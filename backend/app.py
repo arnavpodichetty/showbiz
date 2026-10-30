@@ -282,14 +282,28 @@ def api_key_check(req: KeyReq):
 def api_search(q: str, x_setlistfm_key: Optional[str] = Header(None)):
     try:
         return setlistfm.search_artists(q, _key(x_setlistfm_key))
-    except setlistfm.MissingKey:
-        raise HTTPException(401, NEED_KEY)
-    except setlistfm.KeyRejected:
-        raise HTTPException(401, BAD_KEY)
-    except setlistfm.LimitReached:
-        raise HTTPException(429, LIMIT)
     except setlistfm.SetlistFMError as e:
+        # setlist.fm said no (no key, bad key, daily limit, outage). Artists already
+        # downloaded can still be predicted, so offer any that match.
+        local = _search_downloaded(q)
+        if local:
+            return local
+        if isinstance(e, setlistfm.MissingKey):
+            raise HTTPException(401, NEED_KEY)
+        if isinstance(e, setlistfm.KeyRejected):
+            raise HTTPException(401, BAD_KEY)
+        if isinstance(e, setlistfm.LimitReached):
+            raise HTTPException(429, LIMIT)
         raise HTTPException(502, str(e))
+
+
+def _search_downloaded(q: str) -> list[dict]:
+    needle = q.strip().lower()
+    return [
+        {"mbid": a["mbid"], "name": a["name"], "disambiguation": a.get("disambiguation") or ""}
+        for a in store.list_artists()
+        if needle and needle in a["name"].lower()
+    ][:10]
 
 
 @app.get("/api/artists")
