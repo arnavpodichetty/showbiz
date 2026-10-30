@@ -1,9 +1,8 @@
 """Train, backtest, and predict.
 
-Two models, both gradient-boosted trees on one row per (song, show), trained on
-every downloaded artist at once (pooling beat per-artist models; see PROCESS.md):
-  - "accurate": CatBoost, tuned with Optuna. Best accuracy, retrains in ~6 s.
-  - "fast":     LightGBM, tuned with Optuna. About 1% less accurate, retrains in ~1.5 s.
+Model: CatBoost (gradient-boosted trees) on one row per (song, show), trained on
+every downloaded artist at once, with every artist weighted equally. It was the most
+accurate of every model tested; see PROCESS.md.
 Baseline: the song's play rate this tour (or over the last 10 shows if the
 tour has fewer than 3 shows so far).
 """
@@ -13,6 +12,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+from catboost import CatBoostClassifier
 from sklearn.metrics import brier_score_loss, log_loss
 
 from .features import FEATURES, History, Target
@@ -22,16 +22,10 @@ MIN_SHOWS = 10            # shows needed to predict an artist (pooling lets smal
 MIN_BACKTEST_SHOWS = 30   # shows needed to report a backtest for an artist
 
 # Settings picked by Optuna on a separate tuning block across 17 artists (experiments/round3.py).
-MODELS = {
-    "accurate": ("catboost", dict(
-        depth=9, learning_rate=0.0466, iterations=150, l2_leaf_reg=1.21, random_strength=1.06,
-        bagging_temperature=0.039, border_count=254, grow_policy="Depthwise", min_data_in_leaf=36,
-        verbose=0, random_seed=0, thread_count=-1, allow_writing_files=False)),
-    "fast": ("lightgbm", dict(
-        num_leaves=42, min_child_samples=10, n_estimators=150, learning_rate=0.0391, reg_lambda=0.00214,
-        subsample=0.887, subsample_freq=1, colsample_bytree=0.695, verbose=-1, random_state=0, n_jobs=-1)),
-}
-DEFAULT_MODEL = "accurate"
+CATBOOST_PARAMS = dict(
+    depth=9, learning_rate=0.0466, iterations=150, l2_leaf_reg=1.21, random_strength=1.06,
+    bagging_temperature=0.039, border_count=254, grow_policy="Depthwise", min_data_in_leaf=36,
+    verbose=0, random_seed=0, thread_count=-1, allow_writing_files=False)
 
 
 def baseline_probs(df: pd.DataFrame) -> np.ndarray:
@@ -40,15 +34,19 @@ def baseline_probs(df: pd.DataFrame) -> np.ndarray:
     return np.clip(p, 0.01, 0.99)
 
 
-def _fit(train: pd.DataFrame, kind: str = DEFAULT_MODEL):
-    lib, params = MODELS[kind]
-    if lib == "catboost":
-        from catboost import CatBoostClassifier
-        clf = CatBoostClassifier(**params)
-    else:
-        import lightgbm as lgb
-        clf = lgb.LGBMClassifier(**params)
-    clf.fit(train[FEATURES].values.astype(np.float32), train["label"].values)
+def _artist_weights(parts: list[pd.DataFrame]) -> np.ndarray:
+    """Every artist counts equally in training, however many shows they have (round D)."""
+    w = np.concatenate([np.full(len(p), 1.0 / len(p)) for p in parts if len(p)])
+    return w / w.mean()
+
+
+def _fit(parts: list[pd.DataFrame]) -> CatBoostClassifier:
+    """Fit on a list of per-artist training tables."""
+    parts = [p for p in parts if len(p)]
+    train = pd.concat(parts)
+    clf = CatBoostClassifier(**CATBOOST_PARAMS)
+    clf.fit(train[FEATURES].values.astype(np.float32), train["label"].values,
+            sample_weight=_artist_weights(parts))
     return clf
 
 
@@ -81,19 +79,19 @@ def _metrics(y, p) -> dict:
     return {"brier": float(brier_score_loss(y, p)), "log_loss": float(log_loss(y, p, labels=[0, 1]))}
 
 
-def train_global(hists: dict, tables: dict, kind: str = DEFAULT_MODEL) -> tuple:
+def train_global(hists: dict, tables: dict, backtest: bool = False) -> tuple:
     """Train one model on every artist.
 
-    Backtest: one fit on each artist's first 85% of shows, scored on each artist's
-    last 15%, so no artist's test shows are seen in training. Then a final fit on everything.
+    With backtest=True, first fits on each artist's first 85% of shows and scores each
+    artist's last 15% (no test show is seen in training). The site skips this: it doubles
+    the training time and the site doesn't show it. The experiments/ scripts do the testing.
     Returns (final classifier, {artist id: backtest dict}).
     """
     cuts = {k: int(len(h.shows) * (1 - TEST_FRACTION)) for k, h in hists.items()}
     backtests: dict = {}
     eligible = [k for k, h in hists.items() if len(h.shows) >= MIN_BACKTEST_SHOWS and len(tables[k])]
-    if eligible:
-        train = pd.concat([tables[k][tables[k].show_i < cuts[k]] for k in hists if len(tables[k])])
-        clf = _fit(train, kind)
+    if backtest and eligible:
+        clf = _fit([tables[k][tables[k].show_i < cuts[k]] for k in hists if len(tables[k])])
         for k in eligible:
             h, t = hists[k], tables[k]
             test = t[t.show_i >= cuts[k]]
@@ -112,7 +110,7 @@ def train_global(hists: dict, tables: dict, kind: str = DEFAULT_MODEL) -> tuple:
                 "baseline": {**_metrics(y, p_base), **_show_metrics(test, p_base, actual_len),
                              "calibration": _calibration(y, p_base)},
             }
-    final = _fit(pd.concat([t for t in tables.values() if len(t)]), kind)
+    final = _fit(list(tables.values()))
     return final, backtests
 
 

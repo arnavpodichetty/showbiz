@@ -20,7 +20,7 @@ import numpy as np
 import optuna
 import pandas as pd
 
-from backend.features import FEATURES
+from backend.features import BASE_FEATURES as FEATURES  # round 3 used the original 19
 from experiments.compare_models import CACHE, TESTS, TUNE, _xy, load_tables, score, split
 
 warnings.filterwarnings("ignore")

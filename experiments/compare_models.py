@@ -24,7 +24,7 @@ from sklearn.metrics import brier_score_loss, log_loss
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend import store  # noqa: E402
-from backend.features import FEATURES, History, parse_all  # noqa: E402
+from backend.features import BASE_FEATURES as FEATURES, History, parse_all  # noqa: E402  (rounds 1-3 used the original 19)
 from backend.model import baseline_probs  # noqa: E402
 
 warnings.filterwarnings("ignore")

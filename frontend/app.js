@@ -107,32 +107,49 @@ async function chooseArtist(a) {
   }
 }
 
-async function pollSync() {
+// Shows the prediction as soon as the newest setlists are in ("ready"), keeps tracking the
+// download of older ones, then quietly re-predicts with everything once it's done.
+async function pollSync(mbid = current.mbid, shown = false) {
+  if (!current || current.mbid !== mbid) return;          // switched artist: stop tracking this one
   let s;
-  try { s = await api(`/api/sync/${current.mbid}`); } catch { return setTimeout(pollSync, 1500); }
-  if (s.status === "syncing") {
-    const total = s.total ? Math.min(s.total, 1000) : null;
-    setStatus(total ? `Downloading setlists: ${s.fetched || 0} of ${total}` : "Downloading setlists…");
-    sheetMessage(current.name, total ? `Reading ${s.fetched || 0} of ${total} old setlists…` : "Reading their old setlists…");
-    return setTimeout(pollSync, 1000);
-  }
-  if (s.status === "training") {
-    setStatus("Learning how they build a set…");
-    return setTimeout(pollSync, 800);
-  }
+  try { s = await api(`/api/sync/${mbid}`); } catch { return setTimeout(() => pollSync(mbid, shown), 1500); }
+  if (!current || current.mbid !== mbid) return;
+  const total = s.total ? Math.min(s.total, 1000) : null;
   if (s.status === "error") {
+    if (shown) return setStatus("");                    // keep the early prediction; older shows just didn't arrive
     setStatus("Couldn't download setlists from setlist.fm. Wait a minute and pick the artist again.", true);
     sheetMessage(current.name, "Couldn't get their setlists this time.");
     return;
   }
-  setStatus("");
-  loadOverview();
+  if (s.status === "syncing" || s.status === "training") {
+    if (s.ready && !shown) {
+      shown = true;
+      await loadOverview();
+    }
+    if (shown) {
+      if (s.first_time && total && s.fetched < total) setStatus(`Still reading older setlists (${s.fetched} of ${total}). The prediction will update when it's done.`);
+    } else if (s.status === "training") {
+      setStatus("Learning how they build a set…");
+    } else {
+      setStatus(total ? `Downloading setlists: ${s.fetched || 0} of ${total}` : "Downloading setlists…");
+      sheetMessage(current.name, total ? `Reading ${s.fetched || 0} of ${total} old setlists…` : "Reading their old setlists…");
+    }
+    return setTimeout(() => pollSync(mbid, shown), 1000);
+  }
+  // done
+  if (shown) {
+    setStatus("");
+    if (s.new > 0) predict();                             // new setlists arrived: update (keeps the form as is)
+  } else {
+    setStatus("");
+    loadOverview();
+  }
 }
 
 // ---------- overview + show form ----------
 async function loadOverview() {
   try {
-    overview = await api(`/api/artist/${current.mbid}/overview?model=${chosenModel()}`);
+    overview = await api(`/api/artist/${current.mbid}/overview`);
   } catch (err) {
     const n = /found (\d+)/.exec(err.message)?.[1];
     const msg = n
@@ -188,26 +205,6 @@ function isoInDays(n) {
 
 $("#show-form").addEventListener("submit", (e) => { e.preventDefault(); predict(); });
 
-const MODEL_HINTS = {
-  accurate: "Best predictions. Takes a few seconds after new setlists arrive.",
-  fast: "About 1% less accurate, but ready almost instantly.",
-};
-function chosenModel() {
-  return document.querySelector('input[name="f-model"]:checked').value;
-}
-document.querySelectorAll('input[name="f-model"]').forEach((r) =>
-  r.addEventListener("change", () => {
-    $("#model-hint").textContent = MODEL_HINTS[chosenModel()];
-    try { localStorage.setItem("showbiz-model", chosenModel()); } catch {}
-    if (current && overview) predict();
-  })
-);
-try {
-  const saved = localStorage.getItem("showbiz-model");
-  const r = saved && document.querySelector(`input[name="f-model"][value="${saved}"]`);
-  if (r) { r.checked = true; $("#model-hint").textContent = MODEL_HINTS[saved]; }
-} catch {}
-
 async function predict() {
   if ($("#f-save").checked && !$("#f-date").value) {
     return setStatus("Pick a date to save a prediction, so we know which show to grade it against.", true);
@@ -222,7 +219,6 @@ async function predict() {
         mbid: current.mbid, date: $("#f-date").value || null,
         city: $("#f-city").value, country: $("#f-country").value,
         tour: $("#f-tour").value, is_festival: $("#f-fest").checked, log: $("#f-save").checked,
-        model: chosenModel(),
       }),
     });
     lastResult = out;
@@ -250,14 +246,21 @@ function writeSheet(o) {
   const byName = Object.fromEntries(o.songs.map((s) => [s.song, s]));
   const onSheet = new Set(o.setlist.map((s) => s.song));
 
-  // rotation alternates: other songs from the same swap group that didn't make the sheet
+  // rotation alternates: songs from the same swap group that didn't make the sheet.
+  // Each sheet song gets at most MAX_ALTS, and no alternate is listed under two songs.
+  // If a group covers several sheet songs, the alternates are shared out round-robin,
+  // starting with the least certain sheet song (the one most likely to be swapped out).
+  const MAX_ALTS = 3;
   const altsFor = {};
   for (const g of o.rotations) {
-    const members = g.songs.map((s) => s.song);
-    for (const m of members) {
-      if (!onSheet.has(m)) continue;
-      altsFor[m] = g.songs.filter((s) => s.song !== m && !onSheet.has(s.song) && s.p >= 0.05);
-    }
+    const members = g.songs.filter((s) => onSheet.has(s.song)).sort((a, b) => a.p - b.p);
+    if (!members.length) continue;
+    const alts = g.songs.filter((s) => !onSheet.has(s.song) && s.p >= 0.05);   // already sorted, most likely first
+    members.forEach((m) => (altsFor[m.song] = []));
+    alts.forEach((a, k) => {
+      const list = altsFor[members[k % members.length].song];
+      if (list.length < MAX_ALTS) list.push(a);
+    });
   }
 
   const kind = t.tour_mode === "none" ? "one-off show" : t.tour_mode === "new" ? "new tour" : "";

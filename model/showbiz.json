@@ -1,0 +1,42 @@
+{
+  "trained": "2026-10-29",
+  "n_artists": 100,
+  "n_setlists": 33860,
+  "n_rows": 1918444,
+  "features": [
+    "rate_last5",
+    "rate_last10",
+    "rate_last25",
+    "rate_last100",
+    "rate_tour",
+    "n_tour_prior",
+    "log_shows_since",
+    "played_prev",
+    "same_run",
+    "played_in_run",
+    "is_festival",
+    "rate_festival",
+    "rate_headline",
+    "rate_country",
+    "n_country_prior",
+    "log_days_since_debut",
+    "log_gap_days",
+    "tour_is_new",
+    "no_tour",
+    "band_overlap",
+    "band_pool_ratio",
+    "is_cover"
+  ],
+  "params": {
+    "depth": 9,
+    "learning_rate": 0.0466,
+    "iterations": 150,
+    "l2_leaf_reg": 1.21,
+    "random_strength": 1.06,
+    "bagging_temperature": 0.039,
+    "border_count": 254,
+    "grow_policy": "Depthwise",
+    "min_data_in_leaf": 36,
+    "random_seed": 0
+  }
+}

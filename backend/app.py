@@ -13,30 +13,54 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import setlistfm, store
-from .features import History, Target, parse_all, parse_setlist
-import pandas as pd
+from .features import FEATURES, History, Target, parse_all, parse_setlist
+import json
 
-from .model import DEFAULT_MODEL, MODELS, ArtistModel, score_prediction, train_global
+import joblib
+import pandas as pd
+from catboost import CatBoostClassifier
+
+from .model import CATBOOST_PARAMS, ArtistModel, score_prediction, train_global
 
 MAX_PAGES = 50  # 20 setlists per page -> up to the 1,000 most recent shows
+# Predict as soon as this many setlists are stored (and enough are real shows), while the
+# older ones keep downloading. setlist.fm sends the newest first, and those matter most.
+READY_SETLISTS = 100
+READY_SHOWS = 30
 
 app = FastAPI(title="Showbiz")
 store.init()
 
 _jobs: dict[str, dict] = {}            # artist mbid -> sync status
-# Each model type is shared by every artist. It's retrained (only when someone asks for that
-# type) after any artist's setlists change.
+# One model is shared by every artist. When an artist's setlists change, predictions
+# keep using the current model while a new one trains in the background.
 _histories: dict[str, tuple] = {}   # mbid -> (n setlists, History, training table)
-_shared: dict = {k: {"key": None, "clf": None, "backtests": {}} for k in MODELS}
-_model_lock = threading.Lock()
+_shared: dict = {"key": None, "clf": None, "training": None}
+_model_lock = threading.RLock()     # guards _histories and _shared
+_train_lock = threading.Lock()      # one retrain at a time
+
+# Prepared training data and trained models are saved here, so a restart doesn't redo them.
+CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 
 
 # ---------------- syncing ----------------
+
+def _check_ready(mbid: str, job: dict) -> None:
+    """Mark the artist ready to predict once there are enough recent setlists."""
+    if job.get("ready") or len(store.known_setlist_ids(mbid)) < READY_SETLISTS:
+        return
+    played, _ = parse_all(store.load_setlists(mbid))
+    if len(played) >= READY_SHOWS:
+        get_model(mbid)              # prepare their data now, so the first prediction is quick
+        job["ready"] = True
+
 
 def _sync(mbid: str, max_pages: int = MAX_PAGES) -> None:
     job = _jobs[mbid]
     try:
         known = store.known_setlist_ids(mbid)
+        job["first_time"] = not known     # a brand-new artist (vs. checking for new shows)
+        _check_ready(mbid, job)      # artists downloaded before are ready straight away
         first = setlistfm.setlists_page(mbid, 1)
         total = int(first.get("total", 0))
         pages = min(max_pages, -(-total // 20)) if total else 0
@@ -45,7 +69,8 @@ def _sync(mbid: str, max_pages: int = MAX_PAGES) -> None:
         while data and data.get("setlist"):
             batch = data["setlist"]
             new = store.save_setlists(mbid, batch)
-            job.update(page=page, fetched=job.get("fetched", 0) + len(batch))
+            job.update(page=page, fetched=job.get("fetched", 0) + len(batch), new=job.get("new", 0) + new)
+            _check_ready(mbid, job)
             # incremental: once a whole page is already known, older pages are too
             if known and new == 0 and page > 2:
                 break
@@ -55,7 +80,7 @@ def _sync(mbid: str, max_pages: int = MAX_PAGES) -> None:
             data = setlistfm.setlists_page(mbid, page)
         store.upsert_artist(mbid, job["name"], job.get("disambiguation", ""), datetime.utcnow().isoformat())
         job["status"] = "training"
-        get_model(mbid)
+        get_model(mbid)              # prepare this artist's data; retrain in the background
         job["status"] = "done"
     except Exception as e:  # surface errors to the UI
         job.update(status="error", error=str(e))
@@ -66,7 +91,8 @@ def start_sync(mbid: str, name: str, disambiguation: str = "") -> dict:
     if job and job["status"] in ("syncing", "training"):
         return job
     store.upsert_artist(mbid, name, disambiguation)
-    _jobs[mbid] = {"status": "syncing", "name": name, "disambiguation": disambiguation, "page": 0, "fetched": 0}
+    _jobs[mbid] = {"status": "syncing", "ready": False, "name": name, "disambiguation": disambiguation,
+                   "page": 0, "fetched": 0}
     threading.Thread(target=_sync, args=(mbid,), daemon=True).start()
     return _jobs[mbid]
 
@@ -82,20 +108,101 @@ def default_tour(hist: History) -> str:
     return hist.shows[-1].tour
 
 
+def _slim(table: pd.DataFrame) -> pd.DataFrame:
+    """Keep only what training needs, in compact types (about 4x less memory)."""
+    out = table[FEATURES].astype(np.float32)
+    out["label"] = table["label"].astype(np.int8)
+    out["show_i"] = table["show_i"].astype(np.int32)
+    return out
+
+
 def _history(mbid: str, n: int) -> tuple:
     cached = _histories.get(mbid)
     if cached and cached[0] == n:
         return cached
     played, _ = parse_all(store.load_setlists(mbid))
     h = History(played)
-    table = h.training_table() if len(played) > 15 else pd.DataFrame()
+    path = CACHE_DIR / "tables" / f"{mbid}.pkl"
+    table = None
+    try:
+        saved = joblib.load(path)
+        if saved["n"] == n and saved["columns"] == FEATURES:
+            table = saved["table"]
+    except Exception:
+        pass
+    if table is None:
+        table = _slim(h.training_table()) if len(played) > 15 else pd.DataFrame()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump({"n": n, "columns": FEATURES, "table": table}, path)
     _histories[mbid] = (n, h, table)
     return _histories[mbid]
 
 
-def get_model(mbid: str, kind: str = DEFAULT_MODEL) -> ArtistModel:
-    if kind not in MODELS:
-        raise ValueError(f"Unknown model {kind!r}")
+MODEL_PATH = CACHE_DIR / "models" / "catboost.joblib"
+
+# The model that ships with Showbiz (made by backend/export_model.py, committed to git).
+# A fresh copy uses it until its own database holds at least as many setlists, so one
+# downloaded artist never replaces a model trained on 100.
+BUNDLED_DIR = Path(__file__).resolve().parent.parent / "model"
+BUNDLED_MODEL = BUNDLED_DIR / "showbiz.cbm"
+BUNDLED_META = BUNDLED_DIR / "showbiz.json"
+_bundled: dict = {"loaded": False, "clf": None, "n_setlists": 0}
+
+
+def _load_bundled() -> None:
+    if _bundled["loaded"]:
+        return
+    _bundled["loaded"] = True
+    try:
+        meta = json.loads(BUNDLED_META.read_text())
+        if meta["features"] != FEATURES:
+            return                     # made with different features; can't be used
+        clf = CatBoostClassifier()
+        clf.load_model(str(BUNDLED_MODEL))
+        _bundled.update(clf=clf, n_setlists=int(meta["n_setlists"]))
+    except Exception:
+        pass
+# changes whenever the features or the model settings change, so an old saved model is ignored
+MODEL_SPEC = repr((FEATURES, CATBOOST_PARAMS))
+
+
+def _load_saved_model() -> None:
+    if _shared["clf"] is not None:
+        return
+    try:
+        saved = joblib.load(MODEL_PATH)
+        if saved["spec"] == MODEL_SPEC:
+            _shared["clf"], _shared["key"] = saved["clf"], saved["key"]
+    except Exception:
+        pass
+
+
+def _retrain(key: tuple, hists: dict, tables: dict) -> None:
+    with _train_lock:
+        # skip if the model is already current, or a newer request (e.g. more setlists
+        # arrived during a download) has replaced this one
+        if _shared["key"] == key or _shared["training"] != key:
+            return
+        try:
+            clf, _ = train_global(hists, tables)
+        except Exception:
+            with _model_lock:
+                _shared["training"] = None   # let the next request try again
+            raise
+        with _model_lock:
+            _shared.update(clf=clf, key=key)
+            if _shared["training"] == key:
+                _shared["training"] = None
+        MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump({"spec": MODEL_SPEC, "key": key, "clf": clf}, MODEL_PATH)
+
+
+def get_model(mbid: str) -> ArtistModel:
+    """The artist's history plus the shared model.
+
+    If setlists changed since the model was trained, this returns the current model right
+    away and retrains in the background. Only the very first training waits.
+    """
     with _model_lock:
         counts = store.setlist_counts()
         if mbid not in counts:
@@ -103,13 +210,22 @@ def get_model(mbid: str, kind: str = DEFAULT_MODEL) -> ArtistModel:
         for m, n in counts.items():
             _history(m, n)
         key = tuple(sorted(counts.items()))
-        sh = _shared[kind]
+        sh = _shared
+        _load_saved_model()
+        _load_bundled()
+        if _bundled["clf"] is not None and sum(counts.values()) < _bundled["n_setlists"]:
+            # less local data than the shipped model saw: use the shipped model, don't retrain
+            return ArtistModel(_histories[mbid][1], _bundled["clf"], None)
         if sh["key"] != key:
             hists = {m: _histories[m][1] for m in counts}
             tables = {m: _histories[m][2] for m in counts}
-            sh["clf"], sh["backtests"] = train_global(hists, tables, kind)
-            sh["key"] = key
-        return ArtistModel(_histories[mbid][1], sh["clf"], sh["backtests"].get(mbid))
+            if sh["training"] != key:
+                sh["training"] = key
+                if sh["clf"] is None:
+                    _retrain(key, hists, tables)      # nothing to fall back on yet
+                else:
+                    threading.Thread(target=_retrain, args=(key, hists, tables), daemon=True).start()
+        return ArtistModel(_histories[mbid][1], sh["clf"], None)
 
 
 # ---------------- API ----------------
@@ -124,7 +240,8 @@ def api_search(q: str):
 
 @app.get("/api/artists")
 def api_artists():
-    return store.list_artists()
+    """The "Checked before" list: the last 5 artists picked on the site."""
+    return store.recent_searches(5)
 
 
 class SyncReq(BaseModel):
@@ -135,7 +252,9 @@ class SyncReq(BaseModel):
 
 @app.post("/api/sync")
 def api_sync(req: SyncReq):
-    return start_sync(req.mbid, req.name, req.disambiguation)
+    job = start_sync(req.mbid, req.name, req.disambiguation)
+    store.mark_searched(req.mbid)
+    return job
 
 
 @app.get("/api/sync/{mbid}")
@@ -150,12 +269,12 @@ def api_sync_status(mbid: str):
 
 
 @app.get("/api/artist/{mbid}/overview")
-def api_overview(mbid: str, model: str = DEFAULT_MODEL):
+def api_overview(mbid: str):
     a = store.get_artist(mbid)
     if not a:
         raise HTTPException(404, "Unknown artist; sync it first")
     try:
-        m = get_model(mbid, model)
+        m = get_model(mbid)
     except ValueError as e:
         raise HTTPException(400, str(e))
     played, upcoming = parse_all(store.load_setlists(mbid))
@@ -193,7 +312,6 @@ class PredictReq(BaseModel):
     tour: Optional[str] = None
     is_festival: bool = False
     log: bool = False
-    model: str = DEFAULT_MODEL   # "accurate" (CatBoost) or "fast" (LightGBM)
 
 
 @app.post("/api/predict")
@@ -203,9 +321,7 @@ def api_predict(req: PredictReq):
         raise HTTPException(404, "Unknown artist; sync it first")
     if req.log and not req.date:
         raise HTTPException(400, "Pick a date to save a prediction, so we know which show to grade it against.")
-    if req.model not in MODELS:
-        raise HTTPException(400, "Choose either the more accurate or the faster model.")
-    m = get_model(req.mbid, req.model)
+    m = get_model(req.mbid)
     last = m.hist.shows[-1].date
     general = not req.date
     d = date.fromordinal(last.toordinal() + 1) if general else date.fromisoformat(req.date)
@@ -218,7 +334,6 @@ def api_predict(req: PredictReq):
     t = Target(d, req.city.strip(), req.country.strip().upper(), tour, req.is_festival)
     out = m.predict(t)
     out["target"]["general"] = general
-    out["model"] = req.model
     out["target"]["tour_mode"] = "none" if req.tour == NO_TOUR else "new" if req.tour == NEW_TOUR else "tour"
     if req.log:
         out["prediction_id"] = store.add_prediction({

@@ -8,15 +8,17 @@ Predicts a band's next setlist from their past shows on setlist.fm.
 - **Shows the predicted setlist** as a marker-written sheet taped to the stage, in order, with the encore below a line. Songs they almost always play are written firmly; gambles are light and scrawled. Each song shows its chance of being played.
 - **Shows swaps.** Songs that take turns in the same spot are written beside each other ("or Stockholm Syndrome").
 - **Fits the prediction to the show.** Optionally set the date, city, country, tour (or a new tour, or no tour), and whether it's a festival set. Leave the date blank for a typical show.
-- **Two models to choose from.** "More accurate" (CatBoost) gives the best predictions; "Faster" (LightGBM) is about 1% less accurate but is ready in a few seconds after new setlists arrive.
 - **Flags deep cuts:** the chance they play at least one rarely played song.
 - **Grades itself.** Save a prediction before the show, and once the real setlist is posted it's scored and compared with a plain count of what the band has been playing.
+
+## The model
+
+Showbiz ships with a model already trained on 100 artists across many genres (`model/showbiz.cbm`), so predictions are good from the first search. It holds learned patterns only, no setlists. Your copy keeps using it until your own database has more setlists than it was trained on, then it starts retraining on your data. To rebuild it from your database: `.venv/bin/python -m backend.export_model`.
 
 ## Run it
 
 1. Get a free API key from [setlist.fm](https://api.setlist.fm/docs/1.0/index.html).
-2. On macOS, install OpenMP (needed by LightGBM): `brew install libomp`.
-3. Set up and start the app:
+2. Set up and start the app:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -24,4 +26,4 @@ echo "SETLISTFM_API_KEY=your-key" > .env
 .venv/bin/uvicorn backend.app:app
 ```
 
-4. Open http://localhost:8000.
+3. Open http://localhost:8000.

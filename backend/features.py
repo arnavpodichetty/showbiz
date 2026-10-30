@@ -23,13 +23,26 @@ MULTI_NIGHT_DAYS = 4       # shows in the same city within this many days count 
 RECENT_CANDIDATES = 60     # a song is a candidate if played in the last N shows
 MIN_SONGS = 3              # ignore setlists shorter than this (usually incomplete)
 
-FEATURES = [
+BASE_FEATURES = [
     "rate_last5", "rate_last10", "rate_last25", "rate_last100",
     "rate_tour", "n_tour_prior", "log_shows_since", "played_prev",
     "same_run", "played_in_run", "is_festival", "rate_festival", "rate_headline",
     "rate_country", "n_country_prior", "log_days_since_debut", "log_gap_days",
     "tour_is_new", "no_tour",
 ]
+# Added in round D (see PROCESS.md). Grouped so each idea can be tested on its own.
+NEW_FEATURE_GROUPS = {
+    "variety": ["band_overlap", "band_pool_ratio"],      # how much the band changes its set
+    "due": ["log_typical_gap", "gap_ratio"],              # is the song "due" back?
+    "recent": ["played_last2", "played_last3"],           # played in the last 2 / 3 shows
+    "run": ["run_night", "run_plays"],                    # which night of a multi-night run
+    "city": ["has_city_prior", "played_last_city"],       # what they played last time in this city
+    "cover": ["is_cover"],
+    "album": ["debut_pct"],                               # how new the song is within the catalog
+}
+ALL_FEATURES = BASE_FEATURES + [f for g in NEW_FEATURE_GROUPS.values() for f in g]
+# What the models use. Round D kept band variety and covers; the other groups didn't help both models.
+FEATURES = BASE_FEATURES + NEW_FEATURE_GROUPS["variety"] + NEW_FEATURE_GROUPS["cover"]
 
 
 @dataclass
@@ -43,6 +56,7 @@ class Show:
     is_festival: bool
     songs: list = field(default_factory=list)       # names, in order
     encore: set = field(default_factory=set)         # names played in an encore
+    covers: set = field(default_factory=set)         # names marked as covers
     url: str = ""
 
 
@@ -50,7 +64,7 @@ def parse_setlist(s: dict) -> Show:
     venue = s.get("venue", {}) or {}
     city = venue.get("city", {}) or {}
     tour = (s.get("tour") or {}).get("name", "") or ""
-    songs, encore = [], set()
+    songs, encore, covers = [], set(), set()
     for st in (s.get("sets") or {}).get("set", []) or []:
         for song in st.get("song", []) or []:
             name = (song.get("name") or "").strip()
@@ -59,6 +73,8 @@ def parse_setlist(s: dict) -> Show:
             if name in songs:  # reprises: count once
                 continue
             songs.append(name)
+            if song.get("cover"):
+                covers.add(name)
             if st.get("encore"):
                 encore.add(name)
     text = " ".join([venue.get("name", ""), tour, s.get("info", "") or ""])
@@ -72,6 +88,7 @@ def parse_setlist(s: dict) -> Show:
         is_festival=bool(FESTIVAL_WORDS.search(text)),
         songs=songs,
         encore=encore,
+        covers=covers,
         url=s.get("url", ""),
     )
 
@@ -128,7 +145,17 @@ class History:
         self.set_len = np.array([len(sh.songs) for sh in shows])
         # first show index each song appeared in
         first = np.where(self.P.any(0), self.P.argmax(0), n)
+        self.first_idx = first
         self.first_date = np.array([self.dates[f] if f < n else 0 for f in first])
+        cover_names = {c for sh in shows for c in sh.covers}
+        self.is_cover = np.array([float(s in cover_names) for s in self.songs], dtype=np.float32)
+        self.play_idx = [np.where(self.P[:, j] > 0)[0] for j in range(m)]
+        # overlap (Jaccard) between each show's set and the one before it
+        self.overlap = np.zeros(n, dtype=np.float32)
+        for k in range(1, n):
+            both = (self.P[k] * self.P[k - 1]).sum()
+            either = ((self.P[k] + self.P[k - 1]) > 0).sum()
+            self.overlap[k] = both / either if either else 0
 
     def target_of(self, i: int) -> Target:
         sh = self.shows[i]
@@ -140,7 +167,7 @@ class History:
         Returns (feature frame with a 'song' column, candidate column indices)."""
         P = self.P[:i]
         if i == 0:
-            return pd.DataFrame(columns=["song"] + FEATURES), np.array([], dtype=int)
+            return pd.DataFrame(columns=["song"] + ALL_FEATURES), np.array([], dtype=int)
         cand = np.where(P[max(0, i - RECENT_CANDIDATES):].any(0))[0]
         Pc = P[:, cand]
         tord = t.date.toordinal()
@@ -186,7 +213,38 @@ class History:
         f["log_days_since_debut"] = np.log1p(np.clip(tord - self.first_date[cand], 0, 20 * 365))
         f["log_gap_days"] = np.full(len(cand), np.log1p(max(tord - self.dates[i - 1], 0)))
 
-        df = pd.DataFrame(f)[FEATURES]
+        # --- round D features ---
+        lo = max(0, i - 10)
+        f["band_overlap"] = np.full(len(cand), float(self.overlap[max(1, lo):i].mean()) if i > 1 else 0.0)
+        pool = P[lo:i].any(0).sum()
+        f["band_pool_ratio"] = np.full(len(cand), pool / max(self.set_len[lo:i].mean(), 1))
+
+        shows_since = (i - 1 - last_idx).astype(np.float32)
+        typ = np.empty(len(cand), dtype=np.float32)
+        for k, j in enumerate(cand):
+            pi = self.play_idx[j]
+            nb = np.searchsorted(pi, i)
+            last = pi[max(0, nb - 11):nb]
+            typ[k] = np.median(np.diff(last)) if len(last) >= 3 else 100.0
+        f["log_typical_gap"] = np.log1p(typ)
+        f["gap_ratio"] = np.clip(shows_since / np.maximum(typ, 1), 0, 10)
+
+        f["played_last2"] = Pc[-2:].max(0)
+        f["played_last3"] = Pc[-3:].max(0)
+
+        f["run_night"] = np.full(len(cand), float(run_rows.sum() + 1))
+        f["run_plays"] = Pc[run_rows].sum(0) if run_rows.any() else np.zeros(len(cand))
+
+        city_rows = (self.cities[:i] == t.city.lower()) & ~run_rows if t.city else np.zeros(i, dtype=bool)
+        f["has_city_prior"] = np.full(len(cand), float(city_rows.any()))
+        f["played_last_city"] = Pc[np.where(city_rows)[0][-1]] if city_rows.any() else np.zeros(len(cand))
+
+        f["is_cover"] = self.is_cover[cand]
+
+        known = np.sort(self.first_idx[self.first_idx < i])
+        f["debut_pct"] = np.searchsorted(known, self.first_idx[cand]) / max(len(known) - 1, 1)
+
+        df = pd.DataFrame(f)[ALL_FEATURES]
         df.insert(0, "song", [self.songs[j] for j in cand])
         return df, cand
 

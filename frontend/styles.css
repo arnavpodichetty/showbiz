@@ -155,18 +155,6 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.9); }
 .check small { display: block; color: var(--text-muted); font-size: var(--fs-13); }
 .show-form .button-primary { margin-top: 20px; width: 100%; }
 
-/* Model switch: two segments, the chosen one marked with spike tape */
-.model-pick { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; }
-.model-pick legend { padding: 0; margin-bottom: 4px; font-size: var(--fs-13); color: var(--text-muted); }
-.model-pick small { display: block; margin-top: 6px; font-size: var(--fs-13); color: var(--text-muted); }
-.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid rgb(236 232 226 / 0.28); border-radius: 3px; }
-.seg label { position: relative; cursor: pointer; }
-.seg label + label { border-left: 1px solid rgb(236 232 226 / 0.28); }
-.seg input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
-.seg span { display: block; padding: 9px 8px; text-align: center; font-size: var(--fs-16); color: var(--text-muted); }
-.seg input:checked + span { color: var(--text); box-shadow: inset 0 -3px 0 var(--spike); background: rgb(0 0 0 / 0.22); }
-.seg input:focus-visible + span { outline: 2px solid var(--spike); outline-offset: -2px; }
-
 .shows { list-style: none; padding: 0; margin: 0; font-size: var(--fs-13); }
 .shows li { padding: 6px 0; border-top: 1px solid rgb(236 232 226 / 0.12); }
 .shows li span { color: var(--text-muted); }

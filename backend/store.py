@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "setlists.db"
@@ -48,6 +49,27 @@ def init() -> None:
             );
             """
         )
+        # when someone picked the artist on the site (artists added only for training have none)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(artists)")}
+        if "searched_at" not in cols:
+            c.execute("ALTER TABLE artists ADD COLUMN searched_at TEXT")
+
+
+def mark_searched(mbid: str) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE artists SET searched_at=? WHERE mbid=?", (datetime.utcnow().isoformat(), mbid))
+
+
+def recent_searches(limit: int = 5) -> list[dict]:
+    """Artists picked on the site, most recent first (not ones added only for training)."""
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT a.*, COUNT(s.id) AS n_setlists FROM artists a
+               JOIN setlists s ON s.artist_mbid = a.mbid
+               WHERE a.searched_at IS NOT NULL
+               GROUP BY a.mbid ORDER BY a.searched_at DESC LIMIT ?""", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def upsert_artist(mbid: str, name: str, disambiguation: str, last_synced: str | None = None) -> None:

@@ -378,30 +378,249 @@ Code: `experiments/round3.py`. Optuna and interpret-core were installed for the 
 
 ---
 
-## 12. Where things stand
+## 12. Round D: new features, artist weighting and a faster site
 
-**Models:** two, both trained on every downloaded artist together, and the person using the site picks one with a "More accurate / Faster" switch.
-- *More accurate:* CatBoost tuned with Optuna (depth 9, 150 trees, Depthwise growth).
-- *Faster:* LightGBM tuned with Optuna (42 leaves, 150 trees). About 1% less accurate.
-- Each one only retrains when someone uses it after an artist's data has changed. With 17 artists, the first prediction after a change takes about 15 s with the accurate model and about 4 s with the fast one. After that, predictions take about 10 ms.
+Round C showed that model choice and tuning had run out of room, so this round gave the models new information instead, and changed how the site retrains.
+
+### New features
+Eight ideas, each added as a group so it could be tested on its own (`NEW_FEATURE_GROUPS` in `backend/features.py`). Every one uses only shows before the target show, like the original 19.
+
+| Group | Features | Idea |
+|---|---|---|
+| variety | `band_overlap`, `band_pool_ratio` | How much the band changes its set: average overlap between consecutive setlists over the last 10 shows, and distinct songs in the last 10 shows ÷ average set length |
+| due | `log_typical_gap`, `gap_ratio` | The song's usual gap between plays, and shows since it was last played ÷ that gap |
+| recent | `played_last2`, `played_last3` | Played in either of the last 2 or 3 shows |
+| run | `run_night`, `run_plays` | Which night of a multi-night run this is, and how often the song was already played in it |
+| city | `has_city_prior`, `played_last_city` | Whether the band has played this city before (outside this run), and whether the song was in that set |
+| cover | `is_cover` | setlist.fm marks the song as a cover |
+| album | `debut_pct` | How new the song is compared with the rest of the band's catalog |
+| weighting | (training weights) | Every artist counts equally. Before, Muse's 963 shows counted about 4× more than Chappell Roan's 224. Two versions were tested: equal, and 1/√rows |
+
+The original 19 features came out exactly the same as before, so the comparison is fair. Building every artist's data with the new features takes 7.6 s in total.
+
+### Step 1: choosing, on the tuning block only
+Each version was trained on all artists' shows before the 55–70% block and scored on that block, for both site models (Brier, lower is better):
+
+| Version | More accurate (CatBoost) | Faster (LightGBM) |
+|---|---|---|
+| Current 19 features | 0.07200 | 0.07188 |
+| + variety | **0.07111** | **0.07103** |
+| + due | 0.07251 | 0.07200 |
+| + recent | 0.07243 | 0.07198 |
+| + run | 0.07213 | 0.07196 |
+| + city | 0.07279 | 0.07204 |
+| + cover | 0.07205 | 0.07194 |
+| + album | 0.07377 | 0.07382 |
+| All new features | 0.07100 | 0.07129 |
+| All minus variety | 0.07290 | 0.07263 |
+| All minus due | 0.07137 | 0.07086 |
+| All minus recent | 0.07185 | 0.07091 |
+| All minus run | 0.07109 | 0.07086 |
+| All minus city | 0.07120 | 0.07088 |
+| All minus cover | 0.07142 | 0.07204 |
+| All minus album | 0.07095 | 0.07086 |
+| All + equal artist weight | **0.07066** | 0.07100 |
+| All + 1/√rows artist weight | 0.07101 | 0.07128 |
+
+**Rule:** keep a group only if removing it from "all" makes *both* models worse. That kept **variety** and **cover**. Equal artist weighting beat no weighting for both models, so it was kept too.
+
+**Why the others were dropped:** each either helped only one model or nothing at all. "Album" made things clearly worse, probably because it overlaps with the existing "days since debut" feature and lets the model overfit to particular bands. "Due", "recent", "run" and "city" seem to repeat what `log_shows_since`, `played_prev` and `played_in_run` already say.
+
+### Step 2: scoring the choice on the test blocks
+| Model | Features | Brier | Top picks played | Retrain |
+|---|---|---|---|---|
+| More accurate | current 19 | 0.06358 | 81.8% | 5.6 s |
+| More accurate | **+ variety, cover, equal weighting** | **0.06202** | **82.1%** | 7.5 s |
+| Faster | current 19 | 0.06399 | 81.5% | 1.9 s |
+| Faster | **+ variety, cover, equal weighting** | **0.06247** | 81.9% | 2.0 s |
+
+(The current CatBoost scores 0.06358 here instead of 0.06337 in round C because its settings were rounded slightly when they were copied into the site.)
+
+| Model | Better for | Average gain | 95% bootstrap interval |
+|---|---|---|---|
+| More accurate | 14 of 17 artists | **+2.5%** | +0.0005 to +0.0028 |
+| Faster | 12 of 17 artists | **+2.4%** | +0.0006 to +0.0026 |
+
+**What this shows**
+- This is the biggest gain since pooling artists (section 9), and much bigger than all the tuning in rounds B and C. The interval doesn't include zero, so it isn't chance.
+- The Faster model with the new features (0.06247) now beats the More accurate model with the old ones (0.06358).
+- **Biggest gains:** Interpol (−9%), Chappell Roan (−5%), Metallica (−5%) and beabadoobee (−4%). These are smaller or set-shuffling artists, who benefit most from the model knowing "this band varies a lot" and from no longer being outweighed by Muse.
+- **Small losses:** Muse (+3%), Phish and Gorillaz (about +1%). This is the cost of equal weighting: the biggest artists get less say in training.
+
+**Change made:** the site uses the original 19 features plus `band_overlap`, `band_pool_ratio` and `is_cover` (22 in total), and weights every artist equally in training. The earlier experiment scripts were pinned to the original 19 features so they still reproduce their results.
+
+### Making the site faster
+Retraining was the only slow part (section 11), so the site now avoids waiting for it:
+- **Background retraining.** When setlists change, predictions keep using the current model, and a new one trains in the background, replacing it when ready. The current model is still accurate, because each song's features (play rates, last played and so on) are always worked out from the latest shows. Only the very first training, when no model exists yet, makes you wait.
+- **Saved to disk:** each artist's prepared data (`data/cache/tables/`) and the trained models (`data/cache/models/`). A restart loads them instead of rebuilding. A saved model is ignored automatically if the features or the model settings change. These files are gitignored with the rest of `data/`.
+- **No self-check on the site.** Every retrain used to train twice, once to grade itself and once for real. The grade wasn't shown anywhere, so the site now trains once. The experiments still do the grading.
+- **Retrains run one at a time,** so the two models don't compete for the CPU.
+
+| Case (17 artists) | Before | After |
+|---|---|---|
+| First prediction after new setlists, More accurate | 15.2 s | **0.01 s** (retrains in the background in about 8 s) |
+| First prediction after new setlists, Faster | 3.9 s | **0.01 s** |
+| First prediction after a server restart | about 15 s | **0.4 s** |
+| Very first start, nothing saved | about 15 s | 13.6 s (only ever once) |
+| Prediction with an up-to-date model | about 10 ms | about 10 ms |
+
+### Back to one model
+With background retraining, both models predicted instantly, so the Faster option no longer saved any waiting. It was only about 1% less accurate. **The switch was removed, and the site now uses only CatBoost**, the more accurate model.
+- Removed: the Model switch (HTML, JS, CSS), the model choice in the API, and LightGBM from `requirements.txt`.
+- Removed from the README: the macOS `brew install libomp` step. It's still installed on this computer, because the experiment scripts use LightGBM and XGBoost.
+- Kept: `experiments/round4.py` keeps its own copy of the LightGBM settings, so round D can be rerun.
+- Saved model: `data/cache/models/catboost.joblib`.
+
+---
+
+## 13. Showing a prediction before the download finishes
+
+**Problem:** with retraining in the background, the only wait left was downloading. A new artist took up to about a minute (50 pages of 20 setlists, rate-limited). Even an artist downloaded before waited a few seconds while the site checked setlist.fm for new shows.
+
+**Change:** setlist.fm sends the newest setlists first, and those matter most. So the site now predicts as soon as it has enough of them, and keeps downloading the rest in the background.
+- **Ready rule:** at least 100 setlists stored, with at least 30 real shows among them (`READY_SETLISTS` and `READY_SHOWS` in `backend/app.py`). An artist downloaded before is ready immediately.
+- **The page** shows the prediction as soon as the artist is ready, with a note: "Still reading older setlists (160 of 1000). The prediction will update when it's done." When the download finishes, it predicts again with everything, keeping whatever is in the form. For an artist downloaded before, it only re-predicts if new setlists actually arrived.
+- **Retraining during a download:** every new page changes the data, so a newer retrain request now replaces an older one that hasn't started yet. At most one retrain runs while another waits.
+- **Switching artists** mid-download stops the page from tracking the old one.
+
+**Tested** on a separate copy of the server and data (port 8001), so the test artist didn't appear in the real search history:
+| Case | Before | After |
+|---|---|---|
+| New artist (Radiohead, 1,000 setlists) | about 36 s (whole download) | **6.4 s** to the first prediction; updated automatically at 36 s |
+| Artist already downloaded (Muse) | a few seconds (checking for new shows first) | **1.1 s** |
+
+Using all of Radiohead's data changed the early prediction only slightly. Most songs stayed the same, and "Lucky" went from 54% to 71%.
+
+**Spotted while testing, and fixed:** for bands with a large rotation pool, like Radiohead, the sheet listed far too many swap songs on one line (about 18), and repeated the same group under several songs. The swap detection links songs in chains, so heavy rotators end up in one huge group. Now (in `writeSheet` in `frontend/app.js`):
+- each song on the sheet shows **at most 3** swaps, the most likely first
+- a swap is never listed under two songs
+- when a group covers several sheet songs, its swaps are shared out between them, starting with the least certain song (the one most likely to be swapped out)
+
+Checked on Phish, Muse and Big Thief: no song has more than 3 swaps and none is listed twice. Big Thief now shows "Contact *or Snail, or True Love*" instead of a long list.
+
+---
+
+## 14. Round E: 100 artists
+
+**Why:** pooling artists was the biggest early win, so the training set was widened from 17 artists to 100, picked to cover as many kinds of music and live show as possible.
+
+**Who was added** (83 artists; Radiohead had already been downloaded through the site):
+| Group | Artists |
+|---|---|
+| Pop | Billie Eilish, Dua Lipa, Harry Styles, Ed Sheeran, Sabrina Carpenter, Lady Gaga, The Weeknd, Lorde, Olivia Rodrigo |
+| Classic and arena rock | The Rolling Stones, Paul McCartney, U2, Bob Dylan, Red Hot Chili Peppers, Foo Fighters, Green Day, Guns N' Roses, Depeche Mode, Pearl Jam, Coldplay, The Cure |
+| Metal and industrial | Ghost, Tool, Slipknot, Sleep Token, Bring Me the Horizon, Iron Maiden, Rammstein |
+| Punk, emo and alt | blink-182, Paramore, The Killers, Weezer, IDLES, Fontaines D.C. |
+| Indie and art rock | Radiohead, Arctic Monkeys, Vampire Weekend, The National, Wilco, Phoebe Bridgers, Japanese Breakfast, Florence + the Machine, Lana Del Rey, Tame Impala, Mitski |
+| Jam and bluegrass | Dead & Company, Goose, Widespread Panic, Billy Strings, King Gizzard & the Lizard Wizard |
+| Country, folk and Americana | Luke Combs, Chris Stapleton, Jason Isbell and the 400 Unit, Tyler Childers, Kacey Musgraves, The Avett Brothers, Hozier, Morgan Wallen, Noah Kahan |
+| Hip-hop and R&B | Drake, Travis Scott, J. Cole, SZA, Doja Cat, Kendrick Lamar |
+| Latin | Shakira, Peso Pluma, Maná, Karol G |
+| East Asia | Stray Kids, SEVENTEEN, BABYMETAL, ONE OK ROCK |
+| Electronic | LCD Soundsystem, ODESZA |
+| Jazz and instrumental | Khruangbin, Jacob Collier |
+| Non-English Europe | Måneskin, Die Toten Hosen, Indochine |
+| Africa | Burna Boy |
+| Residencies and solo | Billy Joel, John Mayer |
+
+The list mixes fixed shows (Iron Maiden, Rammstein, Coldplay) with heavy rotators (Bob Dylan, Goose, Billy Strings), residencies (Billy Joel), stadium acts and mid-size touring bands, and artists from the 1960s to the 2020s.
+
+**Downloading**
+- The first 15 were capped at their 500 most recent setlists, and the other 67 at 260, to stay inside setlist.fm's daily request limit (about 1,440 for a standard key). Recent shows matter most, so the cap costs little.
+- The download script looks each name up and checks it matches exactly. It skips artists already done and stops cleanly if setlist.fm starts refusing requests, so it can be resumed. It never needed to.
+- All 82 downloads worked. Arctic Monkeys was already partly downloaded (300 setlists, up to their last tour in 2023), so it was left as it was.
+- **Total: 100 artists, 33,860 setlists,** about 1.9 million training rows (up from 459,000). 98 artists have enough shows to be tested (at least 80 usable). Peso Pluma and Burna Boy have fewer, but still go into the site's training data.
+
+**Test** (`experiments/round5.py`, the site's model: CatBoost with 22 features and equal artist weighting)
+
+*1. Does training on more artists help the original 17?* Same test blocks as rounds B to D:
+| Trained on | Brier | Top picks played |
+|---|---|---|
+| The 17 original artists | 0.06194 | 82.1% |
+| All 98 testable artists | **0.06134** | **82.3%** |
+
+About 1% better, and better for 14 of 17 artists, but the 95% interval (−0.0006 to +0.0015) includes zero. The gain is small and might be chance. Most of the benefit of pooling had already come from the first 17. Interpol (139 shows) got worse (0.086 → 0.093); Chappell Roan, beabadoobee, Metallica and Tyler, The Creator gained the most.
+
+*2. Do the round D features hold up on artists that weren't used to choose them?* The 81 new testable artists. For this check, one model is trained per test block on every artist's earlier shows, so no artist's test shows are ever trained on:
+| Version | Brier | Top picks played |
+|---|---|---|
+| Site features (22, equal artist weight) | **0.05796** | **82.3%** |
+| Original 19 features, no weighting | 0.05912 | 81.9% |
+| Baseline (tour play count) | 0.08731 | 76.8% |
+
+- Round D's features are **2.0% better** on these new artists, for 58 of 81, with a 95% interval of +0.0007 to +0.0016. That's a real gain, which confirms round D wasn't a fluke of its 17 artists.
+- **The model beats the baseline for all 81 new artists,** by 34% on average.
+- **Biggest gains from the new features:** fixed-show acts, where "how much the band varies" matters most. Rammstein −33%, Iron Maiden −29%, Sleep Token −12%.
+- **Biggest losses:** a few pop acts. Lady Gaga +14%, Tame Impala +8%, Billie Eilish +7%.
+- **Easiest artists:** Iron Maiden (Brier 0.003), Dua Lipa, Rammstein, The Weeknd. **Hardest:** Jason Isbell (0.141), LCD Soundsystem, Radiohead, Red Hot Chili Peppers.
+
+**Site changes for the bigger dataset**
+- The site's saved training data now keeps only the columns the model uses, in compact number types, about 3× smaller (an artist's table went from 4.6 MB to 1.5 MB). The server uses about 470 MB with 100 artists.
+- With 100 artists, a background retrain takes about 26 s. The first start after this change took 32 s while every artist's saved data was converted to the smaller format; that only happens once. Predictions still take about 30 ms.
+
+**Decision:** keep all 100. The accuracy gain for the original 17 is small, but the site now has good predictions ready for 100 artists across many genres, and no part of the test got worse on average.
+
+---
+
+## 15. Shipping the trained model
+
+**Goal:** everyone who runs Showbiz starts with the 100-artist model, instead of a model trained only on the few artists they happen to search.
+
+**How**
+- `backend/export_model.py` trains on every artist in the local database and saves `model/showbiz.cbm`, plus `model/showbiz.json` (date, number of artists, setlists and rows, the feature list and the settings). Both are committed to git. The model file is 2.2 MB.
+- It uses CatBoost's own file format, not Python's pickle. Loading a pickle can run arbitrary code, which isn't safe for a file people download from a repo; the CatBoost format is just data.
+- The model contains learned patterns only: no setlists, and no song or artist names. The training used number arrays without column names.
+
+**The retraining rule:** on a fresh copy, the first artist someone downloads would normally trigger a retrain on that one artist, replacing a model trained on 100 with a much worse one. So a copy uses the shipped model, and doesn't retrain, **until its own database has at least as many setlists as the shipped model was trained on** (33,860). After that, it retrains on its own data as before. The shipped model is also ignored if the feature list in the code changes (it would no longer fit).
+
+**Tested** with a fresh copy on port 8001 with an empty database: it downloaded Peso Pluma (113 setlists in 5.6 s), predicted in 0.04 s using the shipped model, and created no local model. Its predictions matched the main 100-artist copy exactly.
+
+To refresh the shipped model after adding artists: `.venv/bin/python -m backend.export_model`, then commit `model/`.
+
+---
+
+## 16. "Checked before" shows only your own searches
+
+**Problem:** the "Checked before" list under the search box showed every artist in the database, so after round E it listed all 100, including the 82 added only for training.
+
+**Change**
+- A new `searched_at` column in the `artists` table is set only when someone picks an artist on the site (`POST /api/sync`). Artists downloaded by the training scripts don't have one.
+- "Checked before" (`/api/artists`) now shows the **5 most recently picked** artists, newest first. The full artist list (`store.list_artists`) is unchanged, so training still uses all 100.
+- The list started empty, because there was no record of which existing artists had been picked on the site. It fills up as artists are picked.
+
+Tested on a copy of the database: after picking 6 artists, the list showed the last 5, newest first.
+
+---
+
+## 17. Where things stand
+
+**Model:** one CatBoost model, tuned with Optuna (depth 9, 150 trees, Depthwise growth), trained on every downloaded artist together (100 artists, 33,860 setlists) with every artist weighted equally. Brier 0.0613 on the original 17 artists' test blocks (baseline 0.0848), and 0.0580 on the 81 newer ones (baseline 0.0873).
+- **Features:** 22, the original 19 plus band variety (2) and covers (1).
+- **Speed:** predictions take about 10 ms. When setlists change, the site keeps predicting with the current model while the new one trains in the background (about 26 s with 100 artists). Prepared data and models are saved in `data/cache/`, so a restart is ready in under half a second. A new artist shows a prediction after its newest 100 setlists (about 6 s), and updates when the rest have downloaded.
 
 **Files**
 | Path | What it does |
 |---|---|
 | `backend/setlistfm.py` | setlist.fm API client (rate limiting and retries) |
 | `backend/store.py` | SQLite storage for setlists and saved predictions |
-| `backend/features.py` | Turns setlists into the 19 features, using only earlier shows |
-| `backend/model.py` | The two pooled models (CatBoost and LightGBM), backtesting, building the setlist, rotation slots, deep cuts, scoring |
-| `backend/app.py` | FastAPI server and API endpoints |
+| `backend/features.py` | Turns setlists into features (22 used, 32 computed), using only earlier shows |
+| `backend/model.py` | The pooled CatBoost model, backtesting, building the setlist, rotation slots, deep cuts, scoring |
+| `backend/app.py` | FastAPI server, API endpoints, background retraining, disk cache, shipped-model fallback |
+| `backend/export_model.py` | Trains on the local database and saves the model that ships with the site |
+| `model/` | The shipped model (`showbiz.cbm`) and what it was trained on (`showbiz.json`) |
 | `frontend/` | The stage-floor interface (HTML, CSS, JS) |
 | `experiments/compare_models.py` | Round 1: compares model types |
 | `experiments/tune_models.py` | Round 2: tuning, blends, calibration, per-artist table |
 | `experiments/round3.py` | Round 3: Optuna tuning, new model types, speed timing |
+| `experiments/round4.py` | Round D: new feature groups and artist weighting |
+| `experiments/round5.py` | Round E: training on 17 vs 100 artists, and a fresh check of round D |
 | `experiments/cache/` | Cached training tables, logs and result CSVs (gitignored) |
 
 **Ideas not yet tried**
-- *Explainable models* (EBM, or monotonic constraints so "played more often recently" can only raise a song's chance).
-- *Ranking models* (LambdaRank), which optimize the order of songs directly instead of each song's probability.
+- *Learning from everyone's searches:* host one shared copy, so every search adds to the same dataset. This needs throttled retraining, per-person privacy for searches and saved predictions, and care with the single API key's daily limit.
+- *More band-level features,* since band variety was the biggest win (for example how often the band changes its opener or encore, or how long its tours are).
+- *Retuning the models with the new features.* Their settings were picked with the original 19 features.
+- *Retrying the dropped groups in other forms,* for example "due" only for songs with a regular rhythm.
 - *Hierarchical Bayesian models,* which share information across artists in a more principled way and give uncertainty ranges.
 - *Survival models* for "how many shows until this song comes back."
 - *Song embeddings or matrix factorization* to learn which songs belong together.
