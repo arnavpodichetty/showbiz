@@ -1,0 +1,325 @@
+/* Tokens ------------------------------------------------------------ */
+:root {
+  --deck: #3B3632;        /* painted plywood stage deck */
+  --deck-deep: #2F2B28;   /* deck in shadow */
+  --paper: #EEF0EC;       /* copy paper under cool light */
+  --ink: #1B1A24;         /* black marker */
+  --ink-2: #3A3846;
+  --ink-3: #5C5A68;
+  --gaff: #24221F;        /* matte black gaffer tape */
+  --gel: #33228F;         /* Lee 181 Congo Blue wash */
+  --spike: #F2C318;       /* yellow spike tape: focus + selected only */
+
+  --text: #ECE8E2;        /* interface text on the deck */
+  --text-muted: #B9B2A9;
+
+  --hand: "Shantell Sans", "Segoe Print", "Bradley Hand", cursive;
+  --ui: "Overpass", "Helvetica Neue", Arial, sans-serif;
+
+  /* Bringhurst scale */
+  --fs-13: 0.8125rem;
+  --fs-16: 1rem;
+  --fs-21: 1.3125rem;
+  --fs-24: 1.5rem;
+  --fs-36: 2.25rem;
+  --fs-48: 3rem;
+
+  --gutter: 16px;
+  --rail: 300px;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  color: var(--text);
+  font: 400 var(--fs-16)/1.5 var(--ui);
+  background-color: var(--deck);
+  /* blue wash from the lighting truss, falling off into the deck */
+  background-image:
+    radial-gradient(ellipse 70% 900px at 72% 0, rgb(51 34 143 / 0.55), transparent 70%),
+    radial-gradient(ellipse 50% 600px at 15% 100%, rgb(51 34 143 / 0.25), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9 0.035' numOctaves='3' seed='4'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.16 0'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)'/%3E%3C/svg%3E");
+  min-height: 100vh;
+}
+
+:focus-visible { outline: 3px solid var(--spike); outline-offset: 2px; }
+[hidden] { display: none !important; }
+a { color: var(--text); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+
+/* Masthead ---------------------------------------------------------- */
+.masthead {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  max-width: 1200px; margin: 0 auto; padding: 20px var(--gutter) 0;
+}
+.wordmark { font-weight: 700; font-size: var(--fs-16); text-decoration: none; letter-spacing: -0.005em; }
+.nav { display: flex; gap: 20px; }
+.nav-link {
+  background: none; border: 0; padding: 4px 0; cursor: pointer;
+  font: 500 var(--fs-16)/1.5 var(--ui); color: var(--text-muted);
+  border-bottom: 4px solid transparent;
+}
+.nav-link:hover { color: var(--text); }
+.nav-link[aria-current="page"] { color: var(--text); border-bottom-color: var(--spike); }
+
+/* Layout ------------------------------------------------------------ */
+.stage {
+  max-width: 1200px; margin: 0 auto; padding: 32px var(--gutter) 96px;
+  overflow-x: clip; /* tape may hang past the sheet, never past the screen */
+  display: grid; gap: 32px 56px;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  grid-template-areas: "artist floor" "show floor";
+  grid-template-rows: auto 1fr;
+  align-items: start;
+}
+.rail-artist { grid-area: artist; }
+.rail-show   { grid-area: show; }
+.floor       { grid-area: floor; grid-row: 1 / span 2; }
+
+.rail-show > * + * { margin-top: 40px; }
+
+@media (max-width: 860px) {
+  .stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "artist" "floor" "show";
+    grid-template-rows: none;
+    padding-top: 24px; gap: 28px;
+  }
+  .floor { grid-row: auto; padding-top: 28px; } /* room for the tape above the sheet */
+}
+
+/* Interface text ---------------------------------------------------- */
+.label-lg, .heading { display: block; font-size: var(--fs-21); font-weight: 700; line-height: 1.25; margin: 0 0 12px; letter-spacing: -0.01em; }
+.heading-xl { font-size: var(--fs-36); font-weight: 700; line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em; }
+.lede { max-width: 64ch; color: var(--text-muted); margin: 0 0 20px; }
+.fine { font-size: var(--fs-13); color: var(--text-muted); max-width: 64ch; margin: 16px 0 0; }
+.status { color: var(--text-muted); margin: 12px 0 0; min-height: 0; }
+.status:empty { display: none; }
+.status.is-error { color: var(--text); border-left: 4px solid var(--spike); padding-left: 10px; }
+
+/* Controls ---------------------------------------------------------- */
+input, select {
+  width: 100%; min-width: 0;
+  font: 400 var(--fs-16)/1.4 var(--ui); color: var(--text);
+  background: rgb(0 0 0 / 0.22);
+  border: 1px solid rgb(236 232 226 / 0.28); border-radius: 3px;
+  padding: 9px 10px;
+}
+input::placeholder { color: rgb(236 232 226 / 0.62); }
+input:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--spike); }
+select option { background: var(--deck-deep); }
+input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.9); }
+.field-row { display: flex; gap: 8px; }
+.field-row input { flex: 1; }
+
+.button {
+  font: 700 var(--fs-16)/1.2 var(--ui); cursor: pointer; white-space: nowrap;
+  padding: 10px 14px; border-radius: 3px;
+  color: var(--text); background: transparent; border: 1px solid rgb(236 232 226 / 0.5);
+}
+.button:hover { border-color: var(--text); }
+.button-primary { background: var(--text); color: var(--ink); border-color: var(--text); padding: 12px 18px; }
+.button-primary:hover { background: #fff; }
+.button:disabled { opacity: 0.6; cursor: progress; }
+.link-button {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: 500 var(--fs-16)/1.5 var(--ui); color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px;
+}
+.link-button:hover { color: var(--text); }
+
+.chosen { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.chosen p { margin: 0; font-size: var(--fs-21); }
+
+.picks { list-style: none; margin: 12px 0 0; padding: 0; }
+.picks:empty { display: none; }
+.pick {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-left: 4px solid transparent;
+  padding: 7px 10px; color: var(--text); font: 400 var(--fs-16)/1.4 var(--ui);
+}
+.pick:hover { border-left-color: rgb(242 195 24 / 0.6); background: rgb(0 0 0 / 0.15); }
+.pick[aria-pressed="true"] { border-left-color: var(--spike); }
+.pick small { display: block; color: var(--text-muted); font-size: var(--fs-13); }
+
+.recent-artists { margin-top: 16px; color: var(--text-muted); font-size: var(--fs-13); }
+.recent-artists:empty { display: none; }
+.recent-artists .link-button { font-size: var(--fs-13); margin-right: 12px; }
+
+.show-form .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.show-form .fields label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-13); color: var(--text-muted); }
+.show-form .fields small { font-size: var(--fs-13); }
+.show-form .fields label:first-child, .show-form .fields label:last-child { grid-column: 1 / -1; }
+.check { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; cursor: pointer; }
+.check input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--spike); flex: none; }
+.check small { display: block; color: var(--text-muted); font-size: var(--fs-13); }
+.show-form .button-primary { margin-top: 20px; width: 100%; }
+
+/* Model switch: two segments, the chosen one marked with spike tape */
+.model-pick { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; }
+.model-pick legend { padding: 0; margin-bottom: 4px; font-size: var(--fs-13); color: var(--text-muted); }
+.model-pick small { display: block; margin-top: 6px; font-size: var(--fs-13); color: var(--text-muted); }
+.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid rgb(236 232 226 / 0.28); border-radius: 3px; }
+.seg label { position: relative; cursor: pointer; }
+.seg label + label { border-left: 1px solid rgb(236 232 226 / 0.28); }
+.seg input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.seg span { display: block; padding: 9px 8px; text-align: center; font-size: var(--fs-16); color: var(--text-muted); }
+.seg input:checked + span { color: var(--text); box-shadow: inset 0 -3px 0 var(--spike); background: rgb(0 0 0 / 0.22); }
+.seg input:focus-visible + span { outline: 2px solid var(--spike); outline-offset: -2px; }
+
+.shows { list-style: none; padding: 0; margin: 0; font-size: var(--fs-13); }
+.shows li { padding: 6px 0; border-top: 1px solid rgb(236 232 226 / 0.12); }
+.shows li span { color: var(--text-muted); }
+
+/* The sheet --------------------------------------------------------- */
+.floor { display: flex; flex-direction: column; align-items: center; }
+.sheet {
+  --tilt: -1deg;
+  position: relative; width: 100%; max-width: 620px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 48px 44px 44px;
+  transform: rotate(var(--tilt));
+  /* lying flat on the floor: tight contact shadow, slight curl at the corners */
+  box-shadow:
+    0 1px 0 rgb(0 0 0 / 0.25),
+    0 10px 18px -10px rgb(0 0 0 / 0.55),
+    inset 0 0 60px rgb(51 34 143 / 0.06);
+  background-image: linear-gradient(170deg, rgb(255 255 255 / 0.5), transparent 40%);
+}
+.sheet.is-empty { min-height: 420px; }
+
+.tape {
+  position: absolute; top: -14px; width: 128px; height: 40px;
+  background: var(--gaff);
+  background-image: repeating-linear-gradient(90deg, rgb(255 255 255 / 0.035) 0 1px, transparent 1px 3px);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
+  /* torn ends */
+  clip-path: polygon(3% 0, 97% 0, 100% 18%, 96% 38%, 99% 60%, 95% 82%, 98% 100%, 2% 100%, 5% 80%, 0 62%, 4% 40%, 1% 20%);
+}
+.tape-l { left: -58px; transform: rotate(-40deg); }
+.tape-r { right: -58px; transform: rotate(36deg); }
+
+.hand { font-family: var(--hand); margin: 0; font-variation-settings: "BNCE" 0, "INFM" 30; }
+.hand-title {
+  font-size: var(--fs-48); line-height: 1; font-weight: 760; letter-spacing: -0.01em;
+  font-variation-settings: "BNCE" 10, "INFM" 30;
+  overflow-wrap: anywhere;
+}
+.hand-sub { font-size: var(--fs-24); font-weight: 480; line-height: 1.25; margin-top: 8px; color: var(--ink-2); font-variation-settings: "BNCE" 20, "INFM" 60; }
+.hand-aside {
+  font-size: var(--fs-16); font-weight: 400; line-height: 1.35; margin-top: 12px; max-width: 40ch;
+  color: var(--ink-2); transform: rotate(-0.8deg);
+  font-variation-settings: "BNCE" 40, "INFM" 100;
+}
+.hand-note { font-size: var(--fs-24); font-weight: 400; line-height: 1.3; margin-top: 20px; color: var(--ink-2); max-width: 26ch; font-variation-settings: "BNCE" 30, "INFM" 80; }
+
+.setlist { list-style: none; padding: 0; margin: 28px 0 0; }
+.song { position: relative; }
+.song-btn {
+  display: grid; grid-template-columns: 1.6em minmax(0, 1fr) auto; align-items: baseline; gap: 0 4px;
+  width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; padding: 3px 0; color: inherit;
+  font-size: var(--fs-24);
+  font-family: inherit; line-height: inherit;
+  transform: translateX(var(--dx, 0)) rotate(var(--rot, 0deg));
+  transform-origin: left center;
+}
+.song-btn:focus-visible { outline-offset: 4px; }
+.song .n { font-family: var(--hand); font-size: 0.56em; font-weight: 500; color: var(--ink-3); font-variation-settings: "INFM" 60; }
+.song .name {
+  font-family: var(--hand);
+  font-size: 1em;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+.song .alts {
+  display: block; margin-top: 2px;
+  font-weight: 400; font-size: 0.62em; line-height: 1.3; color: var(--ink-2);
+  font-variation-settings: "BNCE" 60, "INFM" 100;
+}
+.song .pct {
+  font: 500 var(--fs-13)/1 var(--ui); white-space: nowrap; color: var(--ink-3);
+  padding-left: 10px; font-variant-numeric: tabular-nums;
+}
+
+/* confidence is the handwriting */
+.t-lock   .name { font-weight: 720; color: var(--ink);   font-variation-settings: "BNCE" 0,  "INFM" 0; }
+.t-likely .name { font-weight: 520; color: var(--ink-2); font-variation-settings: "BNCE" 25, "INFM" 45; }
+.t-gamble .name { font-weight: 340; color: var(--ink-3); font-variation-settings: "BNCE" 80, "INFM" 100; }
+
+.detail {
+  font: 400 var(--fs-13)/1.5 var(--ui); color: var(--ink-2);
+  margin: 2px 0 10px 2.4rem; max-width: 52ch;
+  padding-left: 10px; border-left: 2px solid var(--ink-3);
+  overflow: hidden;
+}
+.detail p { margin: 0; }
+
+.encore-rule { display: block; width: 100%; height: 22px; margin: 6px 0 4px; overflow: visible; }
+.encore-rule path { fill: none; stroke: var(--ink); stroke-width: 3; stroke-linecap: round; }
+
+.deep-cut {
+  margin-top: 28px; font-size: var(--fs-21); font-weight: 420; color: var(--ink-2); line-height: 1.3;
+  transform: rotate(-1.5deg); max-width: 30ch;
+  font-variation-settings: "BNCE" 40, "INFM" 90;
+}
+
+@media (min-width: 1100px) {
+  .song-btn { font-size: var(--fs-36); }
+  .song .name { line-height: 1.12; }
+}
+@media (max-width: 560px) {
+  .sheet { --tilt: -0.5deg; padding: 36px 22px 32px; }
+  .tape { width: 92px; height: 30px; top: -10px; }
+  .tape-l { left: -40px; } .tape-r { right: -40px; }
+  .hand-title { font-size: var(--fs-36); }
+  .hand-sub, .hand-note { font-size: var(--fs-21); }
+  .song-btn { grid-template-columns: 1.6em minmax(0, 1fr) auto; }
+  .detail { margin-left: 1.6rem; }
+}
+
+
+.all-songs { max-width: 620px; width: 100%; margin-top: 28px; }
+.all-songs summary { cursor: pointer; font-weight: 700; padding: 6px 0; }
+.table-wrap { overflow-x: auto; }
+.all-songs table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: var(--fs-13); }
+.all-songs th { text-align: left; font-weight: 500; color: var(--text-muted); padding: 6px 8px 6px 0; }
+.all-songs td { padding: 5px 8px 5px 0; border-top: 1px solid rgb(236 232 226 / 0.12); }
+.all-songs .r { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Past predictions -------------------------------------------------- */
+.past { max-width: 1200px; margin: 0 auto; padding: 40px var(--gutter) 96px; }
+.past-summary { margin-top: 32px; max-width: 64ch; font-size: var(--fs-21); line-height: 1.4; }
+.past-summary:empty { display: none; }
+.past-list { list-style: none; padding: 0; margin: 32px 0 0; max-width: 820px; }
+.past-item { padding: 20px 0; border-top: 1px solid rgb(236 232 226 / 0.16); }
+.past-item h2 { font-size: var(--fs-21); margin: 0 0 4px; line-height: 1.3; }
+.past-item p { margin: 0 0 8px; color: var(--text-muted); max-width: 64ch; }
+.past-songs { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--fs-13); }
+.past-songs .hit { color: var(--text); font-weight: 700; }
+.past-songs .miss { color: var(--text-muted); text-decoration: line-through; }
+
+/* The one moment: sheet slapped down, then written --------------------- */
+@media (prefers-reduced-motion: no-preference) {
+  .sheet.is-landing { animation: slap 420ms cubic-bezier(.2, .9, .25, 1.15) both; }
+  .sheet.is-landing .tape { animation: tape-on 260ms 300ms ease-out both; }
+  .sheet.is-landing .write { animation: write var(--dur, 380ms) var(--delay, 0ms) linear both; }
+  .sheet.is-landing .encore-rule path { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 420ms var(--delay, 0ms) ease-in-out forwards; }
+  .detail.is-opening { animation: open 180ms ease-out; }
+}
+@keyframes slap {
+  0%   { opacity: 0; transform: translateY(-18px) rotate(calc(var(--tilt) - 3deg)) scale(1.03); }
+  70%  { opacity: 1; transform: translateY(1px) rotate(calc(var(--tilt) + 0.3deg)) scale(1); }
+  100% { opacity: 1; transform: rotate(var(--tilt)); }
+}
+@keyframes tape-on {
+  from { opacity: 0; scale: 1.25; }
+  to   { opacity: 1; scale: 1; }
+}
+@keyframes write {
+  from { clip-path: inset(-20% 100% -20% 0); }
+  to   { clip-path: inset(-20% -2% -20% 0); }
+}
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes open { from { opacity: 0; max-height: 0; } to { opacity: 1; max-height: 200px; } }

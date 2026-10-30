@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Showbiz</title>
+  <meta name="description" content="See the setlist your band will probably play, written out the way it'll be taped to the stage." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='5' y='3' width='22' height='26' fill='%23EEF0EC'/><rect x='9' y='1' width='14' height='5' fill='%2324221F'/><path d='M9 12h14M9 17h11M9 22h13' stroke='%231B1A24' stroke-width='2.4' stroke-linecap='round'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400..700&family=Shantell+Sans:wght,BNCE,INFM@300..800,-100..100,0..100&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="/">Showbiz</a>
+    <nav class="nav" aria-label="Main">
+      <button class="nav-link" data-view="predict" aria-current="page">Predict</button>
+      <button class="nav-link" data-view="past">Past predictions</button>
+    </nav>
+  </header>
+
+  <!-- PREDICT -->
+  <main id="view-predict" class="stage">
+    <section class="rail-artist" aria-label="Artist">
+      <form id="search-form" class="search">
+        <label for="search-q" class="label-lg">Who are you seeing?</label>
+        <div class="field-row">
+          <input id="search-q" type="search" placeholder="Band or artist" autocomplete="off" required />
+          <button class="button">Find artist</button>
+        </div>
+      </form>
+      <div id="chosen" class="chosen" hidden>
+        <p>Seeing <strong id="chosen-name"></strong></p>
+        <button class="link-button" id="change-artist">Change artist</button>
+      </div>
+      <ul id="search-results" class="picks" aria-label="Search results"></ul>
+      <div id="recent-artists" class="recent-artists"></div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <div class="floor">
+      <article id="sheet" class="sheet is-empty" aria-live="polite" aria-label="Predicted setlist">
+        <span class="tape tape-l" aria-hidden="true"></span>
+        <span class="tape tape-r" aria-hidden="true"></span>
+        <div id="sheet-body" class="sheet-body">
+          <p class="hand hand-title">Who are you seeing?</p>
+          <p class="hand hand-note">Search for an artist and we'll write out the set they're most likely to play.</p>
+        </div>
+      </article>
+      <details id="all-songs" class="all-songs" hidden>
+        <summary>Every song and its chances</summary>
+        <div class="table-wrap"><table id="songs-table"></table></div>
+      </details>
+    </div>
+
+    <div class="rail-show">
+      <form id="show-form" class="show-form" hidden>
+        <h2 class="heading">The show</h2>
+        <div class="fields">
+          <label>Date <input type="date" id="f-date" aria-describedby="date-hint" /><small id="date-hint">Leave blank for a typical show</small></label>
+          <label>City <input id="f-city" placeholder="Los Angeles" autocomplete="off" /></label>
+          <label>Country code <input id="f-country" placeholder="US" maxlength="2" autocomplete="off" /></label>
+          <label>Tour <select id="f-tour"></select></label>
+        </div>
+        <label class="check"><input type="checkbox" id="f-fest" /> <span>Festival set <small>Shorter, with more hits</small></span></label>
+        <fieldset class="model-pick">
+          <legend>Model</legend>
+          <div class="seg">
+            <label><input type="radio" name="f-model" value="accurate" checked /> <span>More accurate</span></label>
+            <label><input type="radio" name="f-model" value="fast" /> <span>Faster</span></label>
+          </div>
+          <small id="model-hint">Best predictions. Takes a few seconds after new setlists arrive.</small>
+        </fieldset>
+        <label class="check"><input type="checkbox" id="f-save" /> <span>Save this prediction <small>We'll grade it once the real setlist is posted</small></span></label>
+        <button class="button button-primary" type="submit">Predict setlist</button>
+      </form>
+
+      <section id="upcoming" class="rail-block" hidden>
+        <h2 class="heading">Upcoming shows</h2>
+        <ul id="upcoming-list" class="picks"></ul>
+      </section>
+
+      <section id="based-on" class="rail-block" hidden>
+        <h2 class="heading">Based on their last shows</h2>
+        <ul id="recent-shows" class="shows"></ul>
+      </section>
+    </div>
+  </main>
+
+  <!-- PAST PREDICTIONS -->
+  <main id="view-past" class="past" hidden>
+    <div class="past-head">
+      <h1 class="heading-xl">Past predictions</h1>
+      <p class="lede">Each saved prediction is locked in before the show, then graded against the real setlist once it's on setlist.fm. Every prediction is also compared with a plain play count, so you can see whether the model is earning its keep.</p>
+      <button class="button" id="btn-refresh">Check for new setlists</button>
+    </div>
+    <div id="past-summary" class="past-summary"></div>
+    <ol id="past-list" class="past-list"></ol>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
