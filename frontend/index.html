@@ -17,12 +17,23 @@
     <nav class="nav" aria-label="Main">
       <button class="nav-link" data-view="predict" aria-current="page">Predict</button>
       <button class="nav-link" data-view="past">Past predictions</button>
+      <button class="nav-link" id="key-link" type="button" aria-controls="key-panel" aria-expanded="false">API key</button>
     </nav>
   </header>
 
   <!-- PREDICT -->
   <main id="view-predict" class="stage">
     <section class="rail-artist" aria-label="Artist">
+      <section id="key-panel" class="key-panel" hidden aria-labelledby="key-heading">
+        <h2 id="key-heading" class="heading">Your setlist.fm API key</h2>
+        <p class="fine">Showbiz reads past setlists from setlist.fm, so it needs a free API key. <a href="https://www.setlist.fm/settings/api" target="_blank" rel="noopener">Get one from setlist.fm</a>, then paste it here. It's saved only in this browser.</p>
+        <form id="key-form" class="field-row">
+          <input id="key-input" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key" aria-label="setlist.fm API key" required />
+          <button class="button">Save key</button>
+        </form>
+        <p id="key-status" class="fine" role="status" aria-live="polite"></p>
+        <button id="key-remove" class="link-button" type="button" hidden>Remove saved key</button>
+      </section>
       <form id="search-form" class="search">
         <label for="search-q" class="label-lg">Who are you seeing?</label>
         <div class="field-row">

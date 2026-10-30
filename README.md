@@ -27,3 +27,12 @@ echo "SETLISTFM_API_KEY=your-key" > .env
 ```
 
 3. Open http://localhost:8000.
+
+## Publishing it
+
+Visitors can use their own free setlist.fm API key: the **API key** link in the header saves it in their browser only, and the server uses it for their requests without storing it.
+
+- On the public server, don't set `SETLISTFM_API_KEY`, so visitors use their own keys rather than yours. Artists already downloaded work without a key.
+- Serve it over HTTPS, since keys are sent with each request.
+- Each browser gets an anonymous ID, so searches and saved predictions stay private to each visitor. Downloaded setlists and the model are shared, so everyone's searches improve it.
+

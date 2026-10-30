@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+import re
+
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -55,13 +57,15 @@ def _check_ready(mbid: str, job: dict) -> None:
         job["ready"] = True
 
 
-def _sync(mbid: str, max_pages: int = MAX_PAGES) -> None:
+def _sync(mbid: str, max_pages: int = MAX_PAGES, key: Optional[str] = None) -> None:
+    """Download an artist's setlists. `key` is the visitor's setlist.fm key (or None to use
+    the server's). It's passed as an argument and never stored in the job, which visitors see."""
     job = _jobs[mbid]
     try:
         known = store.known_setlist_ids(mbid)
         job["first_time"] = not known     # a brand-new artist (vs. checking for new shows)
         _check_ready(mbid, job)      # artists downloaded before are ready straight away
-        first = setlistfm.setlists_page(mbid, 1)
+        first = setlistfm.setlists_page(mbid, 1, key)
         total = int(first.get("total", 0))
         pages = min(max_pages, -(-total // 20)) if total else 0
         job.update(total=total, pages=pages)
@@ -77,23 +81,32 @@ def _sync(mbid: str, max_pages: int = MAX_PAGES) -> None:
             page += 1
             if page > pages:
                 break
-            data = setlistfm.setlists_page(mbid, page)
+            data = setlistfm.setlists_page(mbid, page, key)
         store.upsert_artist(mbid, job["name"], job.get("disambiguation", ""), datetime.utcnow().isoformat())
         job["status"] = "training"
         get_model(mbid)              # prepare this artist's data; retrain in the background
         job["status"] = "done"
+    except setlistfm.KeyRejected:
+        job.update(status="error", error="key_rejected")
+    except setlistfm.LimitReached:
+        job.update(status="error", error="limit")
     except Exception as e:  # surface errors to the UI
         job.update(status="error", error=str(e))
 
 
-def start_sync(mbid: str, name: str, disambiguation: str = "") -> dict:
+def start_sync(mbid: str, name: str, disambiguation: str = "", key: Optional[str] = None) -> dict:
     job = _jobs.get(mbid)
     if job and job["status"] in ("syncing", "training"):
         return job
+    if not (key or setlistfm.server_has_key()):
+        # no key to download with: fine if the artist is already downloaded (predicting needs no key)
+        if store.setlist_counts().get(mbid):
+            return {"status": "done", "name": name, "new": 0}
+        raise setlistfm.MissingKey("No setlist.fm API key")
     store.upsert_artist(mbid, name, disambiguation)
     _jobs[mbid] = {"status": "syncing", "ready": False, "name": name, "disambiguation": disambiguation,
                    "page": 0, "fetched": 0}
-    threading.Thread(target=_sync, args=(mbid,), daemon=True).start()
+    threading.Thread(target=_sync, args=(mbid, MAX_PAGES, key), daemon=True).start()
     return _jobs[mbid]
 
 
@@ -229,19 +242,60 @@ def get_model(mbid: str) -> ArtistModel:
 
 
 # ---------------- API ----------------
+# Visitors send two headers:
+#   X-Setlistfm-Key: their own setlist.fm API key (optional; saved only in their browser)
+#   X-Showbiz-User:  a random id their browser made, so searches and saved predictions stay theirs
+
+NEED_KEY = "Add your setlist.fm API key to look up artists. It's free and takes a minute to get."
+BAD_KEY = "setlist.fm didn't accept your API key. Check it and try again."
+LIMIT = "Your setlist.fm API key has used up today's requests. It'll work again tomorrow; artists already downloaded still work."
+
+
+def _user(x_showbiz_user: Optional[str]) -> str:
+    u = (x_showbiz_user or "").strip()
+    return u if re.fullmatch(r"[A-Za-z0-9-]{8,64}", u) else "anonymous"
+
+
+def _key(x_setlistfm_key: Optional[str]) -> Optional[str]:
+    k = (x_setlistfm_key or "").strip()
+    return k if 8 <= len(k) <= 128 else None
+
+
+@app.get("/api/config")
+def api_config():
+    """Whether this server has its own setlist.fm key, so visitors don't need one."""
+    return {"server_key": setlistfm.server_has_key()}
+
+
+class KeyReq(BaseModel):
+    key: str
+
+
+@app.post("/api/key/check")
+def api_key_check(req: KeyReq):
+    k = _key(req.key)
+    result = setlistfm.check_key(k) if k else "invalid"
+    return {"valid": result != "invalid", "limited": result == "limited"}
+
 
 @app.get("/api/artists/search")
-def api_search(q: str):
+def api_search(q: str, x_setlistfm_key: Optional[str] = Header(None)):
     try:
-        return setlistfm.search_artists(q)
+        return setlistfm.search_artists(q, _key(x_setlistfm_key))
+    except setlistfm.MissingKey:
+        raise HTTPException(401, NEED_KEY)
+    except setlistfm.KeyRejected:
+        raise HTTPException(401, BAD_KEY)
+    except setlistfm.LimitReached:
+        raise HTTPException(429, LIMIT)
     except setlistfm.SetlistFMError as e:
         raise HTTPException(502, str(e))
 
 
 @app.get("/api/artists")
-def api_artists():
-    """The "Checked before" list: the last 5 artists picked on the site."""
-    return store.recent_searches(5)
+def api_artists(x_showbiz_user: Optional[str] = Header(None)):
+    """The "Checked before" list: the last 5 artists this visitor picked."""
+    return store.recent_searches(_user(x_showbiz_user), 5)
 
 
 class SyncReq(BaseModel):
@@ -251,9 +305,13 @@ class SyncReq(BaseModel):
 
 
 @app.post("/api/sync")
-def api_sync(req: SyncReq):
-    job = start_sync(req.mbid, req.name, req.disambiguation)
-    store.mark_searched(req.mbid)
+def api_sync(req: SyncReq, x_setlistfm_key: Optional[str] = Header(None),
+             x_showbiz_user: Optional[str] = Header(None)):
+    try:
+        job = start_sync(req.mbid, req.name, req.disambiguation, _key(x_setlistfm_key))
+    except setlistfm.MissingKey:
+        raise HTTPException(401, NEED_KEY)
+    store.mark_searched(_user(x_showbiz_user), req.mbid)
     return job
 
 
@@ -315,7 +373,7 @@ class PredictReq(BaseModel):
 
 
 @app.post("/api/predict")
-def api_predict(req: PredictReq):
+def api_predict(req: PredictReq, x_showbiz_user: Optional[str] = Header(None)):
     a = store.get_artist(req.mbid)
     if not a:
         raise HTTPException(404, "Unknown artist; sync it first")
@@ -339,23 +397,28 @@ def api_predict(req: PredictReq):
         out["prediction_id"] = store.add_prediction({
             "artist_mbid": req.mbid, "artist_name": a["name"], "created_at": datetime.utcnow().isoformat(),
             "show_date": req.date, "city": t.city, "country": t.country, "is_festival": t.is_festival,
-            "payload": out,
+            "payload": out, "user_id": _user(x_showbiz_user),
         })
     return out
 
 
 @app.get("/api/scoreboard")
-def api_scoreboard(refresh: bool = False):
-    preds = store.list_predictions()
+def api_scoreboard(refresh: bool = False, x_setlistfm_key: Optional[str] = Header(None),
+                   x_showbiz_user: Optional[str] = Header(None)):
+    preds = store.list_predictions(_user(x_showbiz_user))
     today = date.today().isoformat()
     due = [p for p in preds if p["result"] is None and p["show_date"] <= today]
-    if refresh:
-        for mbid in {p["artist_mbid"] for p in due}:
-            # pull the newest couple of pages to pick up freshly posted setlists
-            for page in (1, 2):
-                data = setlistfm.setlists_page(mbid, page)
-                if data.get("setlist"):
-                    store.save_setlists(mbid, data["setlist"])
+    key = _key(x_setlistfm_key)
+    if refresh and (key or setlistfm.server_has_key()):
+        try:
+            for mbid in {p["artist_mbid"] for p in due}:
+                # pull the newest couple of pages to pick up freshly posted setlists
+                for page in (1, 2):
+                    data = setlistfm.setlists_page(mbid, page, key)
+                    if data.get("setlist"):
+                        store.save_setlists(mbid, data["setlist"])
+        except setlistfm.SetlistFMError:
+            pass                                   # grade with what's already downloaded
     by_artist: dict[str, dict] = {}
     for p in due:
         if p["artist_mbid"] not in by_artist:

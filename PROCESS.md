@@ -6,6 +6,8 @@ This file records how the app was made, from the first idea to the current model
 
 ## 1. The idea
 
+**Where it started:** Showbiz was first made to predict the setlists for two concerts: **beabadoobee** and **Gorillaz**. Both were among the first artists downloaded, and the early versions were tested on their shows.
+
 **Goal:** a website that predicts the setlist for a band's next concert.
 
 Setlist predictors already exist, but they mostly give one "average setlist" for a whole tour. The plan was to beat them in three ways:
@@ -592,7 +594,47 @@ Tested on a copy of the database: after picking 6 artists, the list showed the l
 
 ---
 
-## 17. Where things stand
+## 17. Visitors bring their own setlist.fm API key
+
+**Goal:** publish the site without everyone sharing one API key. A standard setlist.fm key allows only about 1,440 requests a day, and one new artist can use 13–50.
+
+**How it works**
+- An **API key** link in the header opens a panel that explains how to get a free key, with a link to setlist.fm's API page. Visitors paste their key, the site checks it with setlist.fm, and it's saved **only in their browser** (`localStorage`).
+- The browser sends the key in an `X-Setlistfm-Key` header with each request, and the server uses it for that visitor's setlist.fm calls. The server never saves or logs the key. During a download it's passed directly to the download thread, never stored in the job info that visitors can see. The rate limiter tracks each key by a short hash, so each visitor's key gets its own limit.
+- **Which key is used:** the visitor's key if they've saved one; otherwise the server's key from `.env`, if it has one. On a public copy, leave `SETLISTFM_API_KEY` unset, and visitors must use their own. `/api/config` tells the page whether the server has a key; if not, the key panel opens automatically.
+- **No key needed** for artists that are already downloaded: predicting doesn't call setlist.fm. A key is only needed to search for artists, download new ones, and fetch new setlists when grading saved predictions.
+- **Clear messages** for each problem, each with the fix:
+  - no key: "Add your setlist.fm API key to look up artists"
+  - a bad key (setlist.fm answers 403 Forbidden): "setlist.fm didn't accept your API key. Check it and try again"
+  - a real key that has used up its requests (429 Limit Exceeded): "It'll work again tomorrow; artists already downloaded still work"
+- **Removing a key:** "Remove saved key" in the panel.
+
+**Per-visitor privacy.** Once the site is public, one person's searches and saved predictions shouldn't show up for everyone. Each browser makes a random anonymous ID and sends it as `X-Showbiz-User`.
+- "Checked before" now comes from a new `searches` table, by visitor. It replaces the `searched_at` column from section 16.
+- Saved predictions have a `user_id`. "Past predictions" and the scoreboard only show the visitor's own.
+- **Still shared:** downloaded setlists (public data from setlist.fm) and the model. Every visitor's downloads improve the model for everyone, and each visitor's downloads use their own key. This is the "learn from everyone's searches" idea from section 13, mostly done.
+
+**Found while testing:** after the day's bulk downloads (82 artists), your own key hit setlist.fm's daily limit. setlist.fm answered "429 Limit Exceeded", which the first version of the key check mistook for a bad key. The check now tells the two apart (`check_key` returns ok, limited or invalid), and a used-up key is still saved.
+
+**Tested** on a copy of the server with no key of its own (port 8001) and a copy of the data:
+| Check | Result |
+|---|---|
+| Server reports no key of its own | `server_key: false` |
+| Search with no key | 401, "Add your setlist.fm API key…" |
+| Fake key / real but used-up key | rejected / accepted as "limited" |
+| Search with a fake key / used-up key | "didn't accept your API key" / "used up today's requests" |
+| Pick an already-downloaded artist with no key | works, and predicts |
+| Pick a new artist with no key | 401, asks for a key |
+| Key visible in job info / server log | no / no (0 times) |
+| Two visitors' "Checked before" lists | Muse for one, Gorillaz for the other |
+| Saved predictions | 1 for the visitor who saved, 0 for the other |
+| Key panel in the browser, desktop and phone | opens on load; a bad key gets an error; a good key is saved; no sideways scrolling |
+
+**Before publishing:** the site must be served over **HTTPS**, because visitors' keys travel in request headers. Don't copy `data/setlists.db` to the public server unless you're happy for its downloaded setlists to be shared. It also holds your own saved predictions, under no visitor ID, so they wouldn't show to anyone.
+
+---
+
+## 18. Where things stand
 
 **Model:** one CatBoost model, tuned with Optuna (depth 9, 150 trees, Depthwise growth), trained on every downloaded artist together (100 artists, 33,860 setlists) with every artist weighted equally. Brier 0.0613 on the original 17 artists' test blocks (baseline 0.0848), and 0.0580 on the 81 newer ones (baseline 0.0873).
 - **Features:** 22, the original 19 plus band variety (2) and covers (1).
@@ -601,8 +643,8 @@ Tested on a copy of the database: after picking 6 artists, the list showed the l
 **Files**
 | Path | What it does |
 |---|---|
-| `backend/setlistfm.py` | setlist.fm API client (rate limiting and retries) |
-| `backend/store.py` | SQLite storage for setlists and saved predictions |
+| `backend/setlistfm.py` | setlist.fm API client: visitors' own keys, rate limiting per key, retries, telling bad keys from used-up ones |
+| `backend/store.py` | SQLite storage for setlists, saved predictions and each visitor's searches |
 | `backend/features.py` | Turns setlists into features (22 used, 32 computed), using only earlier shows |
 | `backend/model.py` | The pooled CatBoost model, backtesting, building the setlist, rotation slots, deep cuts, scoring |
 | `backend/app.py` | FastAPI server, API endpoints, background retraining, disk cache, shipped-model fallback |
@@ -617,7 +659,7 @@ Tested on a copy of the database: after picking 6 artists, the list showed the l
 | `experiments/cache/` | Cached training tables, logs and result CSVs (gitignored) |
 
 **Ideas not yet tried**
-- *Learning from everyone's searches:* host one shared copy, so every search adds to the same dataset. This needs throttled retraining, per-person privacy for searches and saved predictions, and care with the single API key's daily limit.
+- *Publishing:* the site now supports visitors' own keys and per-visitor privacy (section 17). What's left is hosting it with HTTPS, and throttling retraining once many visitors add artists (each retrain takes about 26 s with 100 artists).
 - *More band-level features,* since band variety was the biggest win (for example how often the band changes its opener or encore, or how long its tours are).
 - *Retuning the models with the new features.* Their settings were picked with the original 19 features.
 - *Retrying the dropped groups in other forms,* for example "due" only for songs with a regular rhythm.

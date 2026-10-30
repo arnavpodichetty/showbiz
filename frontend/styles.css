@@ -311,3 +311,10 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.9); }
 }
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @keyframes open { from { opacity: 0; max-height: 0; } to { opacity: 1; max-height: 200px; } }
+
+/* API key panel */
+.key-panel { margin: 0 0 24px; padding-bottom: 20px; border-bottom: 1px solid rgb(236 232 226 / 0.18); }
+.key-panel .heading { margin-top: 0; }
+.key-panel .field-row { margin-top: 12px; }
+.key-panel .fine { margin-top: 10px; }
+.key-panel .fine:empty { display: none; }

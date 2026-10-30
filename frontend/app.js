@@ -10,8 +10,29 @@ let lastResult = null;
 // confidence tiers: how firmly each song is written on the sheet
 const tier = (p) => (p >= 0.85 ? "t-lock" : p >= 0.55 ? "t-likely" : "t-gamble");
 
+// ---------- this browser's key and id ----------
+// Both live only in this browser. The key is sent with requests so the server can call
+// setlist.fm for this visitor; the random id keeps their searches and predictions separate.
+const saved = {
+  mem: {},
+  get(k) { try { return localStorage.getItem(k) ?? this.mem[k] ?? null; } catch { return this.mem[k] ?? null; } },
+  set(k, v) {
+    if (v == null) delete this.mem[k]; else this.mem[k] = v;
+    try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {}
+  },
+};
+const USER_ID = saved.get("showbiz-user") || (() => {
+  const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  saved.set("showbiz-user", id);
+  return id;
+})();
+const apiKey = () => saved.get("showbiz-key");
+let serverKey = true;   // does the server have its own setlist.fm key? (asked on load)
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const headers = { "Content-Type": "application/json", "X-Showbiz-User": USER_ID };
+  if (apiKey()) headers["X-Setlistfm-Key"] = apiKey();
+  const r = await fetch(path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
   if (!r.ok) {
     let msg = r.statusText;
     try { msg = (await r.json()).detail || msg; } catch {}
@@ -42,16 +63,62 @@ function wobble(str) {
 }
 
 // ---------- views ----------
-document.querySelectorAll(".nav-link").forEach((btn) =>
+document.querySelectorAll(".nav-link[data-view]").forEach((btn) =>
   btn.addEventListener("click", () => {
     const view = btn.dataset.view;
-    document.querySelectorAll(".nav-link").forEach((b) => b.removeAttribute("aria-current"));
+    document.querySelectorAll(".nav-link[data-view]").forEach((b) => b.removeAttribute("aria-current"));
     btn.setAttribute("aria-current", "page");
     $("#view-predict").hidden = view !== "predict";
     $("#view-past").hidden = view !== "past";
     if (view === "past") loadPast(false);
   })
 );
+
+// ---------- API key panel ----------
+function showKeyPanel(message = "") {
+  $("#key-panel").hidden = false;
+  $("#key-link").setAttribute("aria-expanded", "true");
+  $("#key-status").textContent = message || (apiKey() ? "A key is saved in this browser. Paste a new one to replace it." : "");
+  $("#key-remove").hidden = !apiKey();
+  $("#key-input").value = "";
+  $("#key-input").focus();
+}
+function hideKeyPanel() {
+  $("#key-panel").hidden = true;
+  $("#key-link").setAttribute("aria-expanded", "false");
+}
+$("#key-link").addEventListener("click", () => ($("#key-panel").hidden ? showKeyPanel() : hideKeyPanel()));
+$("#key-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const k = $("#key-input").value.trim();
+  if (!k) return;
+  const btn = $("#key-form .button");
+  btn.disabled = true;
+  $("#key-status").textContent = "Checking your key with setlist.fm…";
+  let ok = { valid: false };
+  try { ok = await api("/api/key/check", { method: "POST", body: JSON.stringify({ key: k }) }); } catch {}
+  btn.disabled = false;
+  if (!ok.valid) {
+    $("#key-status").textContent = "setlist.fm didn't accept that key. Check you copied all of it, then try again.";
+    return;
+  }
+  saved.set("showbiz-key", k);
+  hideKeyPanel();
+  if (ok.limited) setStatus("Key saved. It has used up today's setlist.fm requests, so new artists will work again tomorrow.");
+  else setStatus(current ? "Key saved." : "Key saved. Search for an artist to start.");
+  if (!current) $("#search-q").focus();
+});
+$("#key-remove").addEventListener("click", () => {
+  saved.set("showbiz-key", null);
+  $("#key-remove").hidden = true;
+  $("#key-status").textContent = serverKey
+    ? "Key removed from this browser. This site's own key will be used instead."
+    : "Key removed from this browser. Add a key to look up more artists.";
+});
+api("/api/config").then((c) => {
+  serverKey = c.server_key;
+  if (!serverKey && !apiKey()) showKeyPanel();
+}).catch(() => {});
 
 // ---------- artist search ----------
 $("#search-form").addEventListener("submit", async (e) => {
@@ -69,7 +136,9 @@ $("#search-form").addEventListener("submit", async (e) => {
       .join("");
     $("#search-results").querySelectorAll(".pick").forEach((el) => el.addEventListener("click", () => chooseArtist(res[+el.dataset.i])));
     $("#search-results .pick")?.focus();
-  } catch {
+  } catch (err) {
+    if (err.status === 401) { showKeyPanel(err.message); return setStatus(err.message, true); }
+    if (err.status === 429) return setStatus(err.message, true);
     setStatus("Couldn't reach setlist.fm. Check your connection and search again.", true);
   }
 });
@@ -102,7 +171,13 @@ async function chooseArtist(a) {
   try {
     await api("/api/sync", { method: "POST", body: JSON.stringify(current) });
     pollSync();
-  } catch {
+  } catch (err) {
+    if (err.status === 401) {
+      showKeyPanel(err.message);
+      setStatus(err.message, true);
+      sheetMessage(a.name, "Add an API key to read their setlists.");
+      return;
+    }
     setStatus("Couldn't start downloading setlists. Wait a minute and pick the artist again.", true);
   }
 }
@@ -115,6 +190,21 @@ async function pollSync(mbid = current.mbid, shown = false) {
   try { s = await api(`/api/sync/${mbid}`); } catch { return setTimeout(() => pollSync(mbid, shown), 1500); }
   if (!current || current.mbid !== mbid) return;
   const total = s.total ? Math.min(s.total, 1000) : null;
+  if (s.status === "error" && s.error === "limit") {
+    const msg = "Your setlist.fm API key has used up today's requests. It'll work again tomorrow.";
+    if (shown) return setStatus(msg, true);
+    setStatus(msg, true);
+    sheetMessage(current.name, "Couldn't get their setlists today.");
+    return;
+  }
+  if (s.status === "error" && s.error === "key_rejected") {
+    const msg = "setlist.fm didn't accept your API key. Check it and try again.";
+    showKeyPanel(msg);
+    if (shown) return setStatus(msg, true);
+    setStatus(msg, true);
+    sheetMessage(current.name, "Couldn't get their setlists this time.");
+    return;
+  }
   if (s.status === "error") {
     if (shown) return setStatus("");                    // keep the early prediction; older shows just didn't arrive
     setStatus("Couldn't download setlists from setlist.fm. Wait a minute and pick the artist again.", true);

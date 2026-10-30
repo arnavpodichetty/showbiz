@@ -49,25 +49,29 @@ def init() -> None:
             );
             """
         )
-        # when someone picked the artist on the site (artists added only for training have none)
-        cols = {r[1] for r in c.execute("PRAGMA table_info(artists)")}
-        if "searched_at" not in cols:
-            c.execute("ALTER TABLE artists ADD COLUMN searched_at TEXT")
+        # Per-visitor data. user_id is a random id each browser makes for itself, so one
+        # person's searches and saved predictions aren't shown to anyone else.
+        c.execute("""CREATE TABLE IF NOT EXISTS searches (
+                         user_id TEXT, mbid TEXT, searched_at TEXT, PRIMARY KEY (user_id, mbid))""")
+        if "user_id" not in {r[1] for r in c.execute("PRAGMA table_info(predictions)")}:
+            c.execute("ALTER TABLE predictions ADD COLUMN user_id TEXT")
 
 
-def mark_searched(mbid: str) -> None:
+def mark_searched(user_id: str, mbid: str) -> None:
     with _lock, _conn() as c:
-        c.execute("UPDATE artists SET searched_at=? WHERE mbid=?", (datetime.utcnow().isoformat(), mbid))
+        c.execute("INSERT OR REPLACE INTO searches(user_id, mbid, searched_at) VALUES (?,?,?)",
+                  (user_id, mbid, datetime.utcnow().isoformat()))
 
 
-def recent_searches(limit: int = 5) -> list[dict]:
-    """Artists picked on the site, most recent first (not ones added only for training)."""
+def recent_searches(user_id: str, limit: int = 5) -> list[dict]:
+    """Artists this visitor picked on the site, most recent first."""
     with _conn() as c:
         rows = c.execute(
-            """SELECT a.*, COUNT(s.id) AS n_setlists FROM artists a
+            """SELECT a.*, COUNT(s.id) AS n_setlists FROM searches q
+               JOIN artists a ON a.mbid = q.mbid
                JOIN setlists s ON s.artist_mbid = a.mbid
-               WHERE a.searched_at IS NOT NULL
-               GROUP BY a.mbid ORDER BY a.searched_at DESC LIMIT ?""", (limit,)
+               WHERE q.user_id = ?
+               GROUP BY a.mbid ORDER BY q.searched_at DESC LIMIT ?""", (user_id, limit)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -139,19 +143,21 @@ def add_prediction(row: dict) -> int:
     with _lock, _conn() as c:
         cur = c.execute(
             """INSERT INTO predictions(artist_mbid, artist_name, created_at, show_date, city, country,
-                                       is_festival, payload, result)
-               VALUES (?,?,?,?,?,?,?,?,NULL)""",
+                                       is_festival, payload, result, user_id)
+               VALUES (?,?,?,?,?,?,?,?,NULL,?)""",
             (
                 row["artist_mbid"], row["artist_name"], row["created_at"], row["show_date"],
                 row["city"], row["country"], int(row["is_festival"]), json.dumps(row["payload"]),
+                row["user_id"],
             ),
         )
         return cur.lastrowid
 
 
-def list_predictions() -> list[dict]:
+def list_predictions(user_id: str) -> list[dict]:
     with _conn() as c:
-        rows = c.execute("SELECT * FROM predictions ORDER BY show_date DESC, id DESC").fetchall()
+        rows = c.execute("SELECT * FROM predictions WHERE user_id = ? ORDER BY show_date DESC, id DESC",
+                         (user_id,)).fetchall()
         out = []
         for r in rows:
             d = dict(r)
