@@ -45,6 +45,11 @@
         <p>Seeing <strong id="chosen-name"></strong></p>
         <button class="link-button" id="change-artist">Change artist</button>
       </div>
+      <figure id="photo" class="photo" hidden>
+        <span class="tape tape-photo" aria-hidden="true"></span>
+        <img id="photo-img" alt="" />
+        <figcaption id="photo-cap" class="hand"></figcaption>
+      </figure>
       <ul id="search-results" class="picks" aria-label="Search results"></ul>
       <div id="recent-artists" class="recent-artists"></div>
       <p id="status" class="status" role="status" aria-live="polite"></p>
@@ -59,8 +64,9 @@
           <p class="hand hand-note">Search for an artist and we'll write out the set they're most likely to play.</p>
         </div>
       </article>
+      <p id="sheet-source" class="credit sheet-source" hidden>Source: <a id="sheet-source-link" href="https://www.setlist.fm/" target="_blank" rel="noopener"></a></p>
       <details id="all-songs" class="all-songs" hidden>
-        <summary>Every song and its chances</summary>
+        <summary>Every song and its chances <small id="all-songs-count"></small></summary>
         <div class="table-wrap"><table id="songs-table"></table></div>
       </details>
     </div>
@@ -101,6 +107,10 @@
     <div id="past-summary" class="past-summary"></div>
     <ol id="past-list" class="past-list"></ol>
   </main>
+
+  <footer class="site-footer">
+    <p>Setlist data from <a href="https://www.setlist.fm/" target="_blank" rel="noopener">setlist.fm</a>. Artist photos from <a href="https://www.deezer.com/" target="_blank" rel="noopener">Deezer</a>. Showbiz isn't affiliated with either.</p>
+  </footer>
 
   <script src="/static/app.js"></script>
 </body>

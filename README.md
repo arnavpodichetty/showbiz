@@ -38,3 +38,6 @@ Visitors can use their own free setlist.fm API key: the **API key** link in the 
 - Serve it over HTTPS, since keys are sent with each request.
 - Each browser gets an anonymous ID, so searches and saved predictions stay private to each visitor. Downloaded setlists and the model are shared, so everyone's searches improve it.
 
+## Credits
+
+Setlists from [setlist.fm](https://www.setlist.fm/). Artist photos from [Deezer](https://www.deezer.com/).

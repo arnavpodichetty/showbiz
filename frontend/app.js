@@ -145,11 +145,25 @@ $("#search-form").addEventListener("submit", async (e) => {
 
 $("#change-artist").addEventListener("click", () => {
   $("#chosen").hidden = true;
+  $("#photo").hidden = true;
+  $("#sheet-source").hidden = true;
   $("#search-form").hidden = false;
   loadRecentArtists();
   $("#search-q").select();
   $("#search-q").focus();
 });
+
+// a photo of the artist, pinned to the deck like a Polaroid
+async function loadPhoto(name) {
+  const fig = $("#photo"), img = $("#photo-img");
+  fig.hidden = true;
+  const { url } = await api(`/api/artist-photo?name=${encodeURIComponent(name)}`).catch(() => ({}));
+  if (!url || current?.name !== name) return;
+  img.onload = () => { if (current?.name === name) fig.hidden = false; };
+  img.alt = `Photo of ${name}`;
+  img.src = url;
+  $("#photo-cap").textContent = name;
+}
 
 async function loadRecentArtists() {
   const list = await api("/api/artists").catch(() => []);
@@ -166,7 +180,8 @@ async function chooseArtist(a) {
   $("#search-form").hidden = true;
   $("#chosen").hidden = false;
   $("#chosen-name").textContent = a.name;
-  ["#show-form", "#upcoming", "#based-on", "#all-songs"].forEach((s) => ($(s).hidden = true));
+  loadPhoto(a.name);
+  ["#show-form", "#upcoming", "#based-on", "#all-songs", "#sheet-source"].forEach((s) => ($(s).hidden = true));
   sheetMessage(a.name, "Reading their old setlists…");
   try {
     await api("/api/sync", { method: "POST", body: JSON.stringify(current) });
@@ -280,12 +295,31 @@ async function loadOverview() {
     })
   );
 
-  $("#recent-shows").innerHTML = o.recent.slice(0, 6)
-    .map((s) => `<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(fmtDate(s.date, { day: "numeric", month: "short", year: "numeric" }))}, ${esc(s.city)}</a> <span>${s.n_songs} songs${s.festival ? ", festival" : ""}</span></li>`)
-    .join("");
+  $("#recent-shows").innerHTML = o.recent.slice(0, 6).map(pastShow).join("");
   $("#based-on").hidden = false;
 
+  $("#sheet-source-link").href = o.artist_url;
+  $("#sheet-source-link").textContent = `${o.artist.name} setlists on setlist.fm`;
+  $("#sheet-source").hidden = false;
+
   predict();
+}
+
+// one of their recent shows, opening to its full setlist
+function pastShow(s) {
+  const main = s.songs.filter((x) => !x.encore), encore = s.songs.filter((x) => x.encore);
+  const item = (x) => `<li>${esc(x.name)}${x.cover ? ` <em>cover</em>` : ""}</li>`;
+  const where = [s.venue, s.tour].filter(Boolean).map(esc).join(" - ");
+  return `<li><details class="past-show">
+    <summary><span class="when">${esc(fmtDate(s.date, { day: "numeric", month: "short", year: "numeric" }))}, ${esc(s.city)}</span>
+      <span class="count">${s.n_songs} songs${s.festival ? ", festival" : ""}</span></summary>
+    <div class="past-show-body">
+      ${where ? `<p class="where">${where}</p>` : ""}
+      ${main.length ? `<ol>${main.map(item).join("")}</ol>` : `<p class="where">No songs listed yet.</p>`}
+      ${encore.length ? `<p class="encore-label">Encore</p><ol start="${main.length + 1}">${encore.map(item).join("")}</ol>` : ""}
+      ${s.url ? `<a class="src" href="${esc(s.url)}" target="_blank" rel="noopener">See it on setlist.fm</a>` : ""}
+    </div>
+  </details></li>`;
 }
 
 function isoInDays(n) {
@@ -447,9 +481,16 @@ function toggleDetail(btn) {
 }
 
 function renderAllSongs() {
+  const since = (n) => (n === 0 ? "Last show" : n === 1 ? "1 show ago" : `${n} shows ago`);
+  $("#all-songs-count").textContent = `${lastResult.songs.length} songs`;
   $("#songs-table").innerHTML =
-    `<thead><tr><th scope="col">Song</th><th scope="col" class="r">Chance</th><th scope="col" class="r">Plain play count</th><th scope="col" class="r">Shows since played</th></tr></thead><tbody>` +
-    lastResult.songs.map((s) => `<tr><td>${esc(s.song)}</td><td class="r">${pct(s.p)}</td><td class="r">${pct(s.p_baseline)}</td><td class="r">${s.shows_since}</td></tr>`).join("") +
+    `<thead><tr><th scope="col">Song</th><th scope="col">Chance</th><th scope="col" class="r">Play count</th><th scope="col" class="r">Last played</th></tr></thead><tbody>` +
+    lastResult.songs.map((s) => `<tr>
+      <td>${esc(s.song)}</td>
+      <td><div class="chance"><div class="bar"><span style="width:${Math.round(s.p * 100)}%"></span></div><b>${pct(s.p)}</b></div></td>
+      <td class="r muted">${pct(s.p_baseline)}</td>
+      <td class="r muted">${since(s.shows_since)}</td>
+    </tr>`).join("") +
     `</tbody>`;
 }
 

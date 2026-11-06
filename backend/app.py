@@ -8,6 +8,7 @@ from typing import Optional
 
 import numpy as np
 import re
+import requests
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -340,6 +341,30 @@ def api_sync_status(mbid: str):
     return {"status": "none"}
 
 
+_photos: dict[str, Optional[dict]] = {}   # artist name -> {url, link} (None if not found)
+
+
+@app.get("/api/artist-photo")
+def api_artist_photo(name: str):
+    """A photo of the artist from Deezer's public search (setlist.fm has no images)."""
+    key = name.strip().lower()
+    if key not in _photos:
+        found = None
+        try:
+            r = requests.get("https://api.deezer.com/search/artist", params={"q": name, "limit": 10}, timeout=8)
+            hits = [a for a in r.json().get("data", [])
+                    if a.get("picture_xl") and "/artist//" not in a["picture_xl"]]  # skip blank placeholders
+            exact = [a for a in hits if a["name"].strip().lower() == key]
+            if exact or hits:
+                # several artists can share a name: take the best known one
+                best = max(exact or hits[:1], key=lambda a: a.get("nb_fan", 0))
+                found = {"url": best["picture_xl"], "link": best.get("link") or "https://www.deezer.com/"}
+        except Exception:
+            return {"url": None, "link": None}  # don't cache network errors
+        _photos[key] = found
+    return _photos[key] or {"url": None, "link": None}
+
+
 @app.get("/api/artist/{mbid}/overview")
 def api_overview(mbid: str):
     a = store.get_artist(mbid)
@@ -349,10 +374,15 @@ def api_overview(mbid: str):
         m = get_model(mbid)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    played, upcoming = parse_all(store.load_setlists(mbid))
+    raw = store.load_setlists(mbid)
+    played, upcoming = parse_all(raw)
     recent = played[-8:][::-1]
+    # setlist.fm's own page for the artist, for the source credit
+    artist_url = next(((r.get("artist") or {}).get("url") for r in reversed(raw)
+                       if (r.get("artist") or {}).get("url")), None)
     return {
         "artist": a,
+        "artist_url": artist_url or "https://www.setlist.fm/",
         "n_shows": len(played),
         "first_show": played[0].date.isoformat() if played else None,
         "last_show": played[-1].date.isoformat() if played else None,
@@ -361,7 +391,8 @@ def api_overview(mbid: str):
         "backtest": m.backtest,
         "recent": [
             {"date": s.date.isoformat(), "venue": s.venue, "city": s.city, "country": s.country,
-             "tour": s.tour, "festival": s.is_festival, "n_songs": len(s.songs), "url": s.url}
+             "tour": s.tour, "festival": s.is_festival, "n_songs": len(s.songs), "url": s.url,
+             "songs": [{"name": n, "encore": n in s.encore, "cover": n in s.covers} for n in s.songs]}
             for s in recent
         ],
         "upcoming": [
