@@ -4,6 +4,8 @@ Predicts a band's next setlist from their past shows on setlist.fm.
 
 **Try it live: https://setlist-predictor-jzlr.onrender.com/** (it may take up to a minute to wake up on the first visit)
 
+![Showbiz predicting a Muse setlist: the show options on the left and the predicted setlist taped to the stage on the right](docs/screenshot.png)
+
 ## What it does
 
 - **Search any artist.** It downloads up to their 1,000 most recent setlists and learns how they build a set.
